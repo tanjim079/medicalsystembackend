@@ -50,7 +50,10 @@ export const updateLabRequestStatus = async (req, res) => {
 const unpackLabReport = (record) => {
   let unpacked = {};
   if (record.result) {
-    try { unpacked = JSON.parse(record.result); } catch(e) {}
+    try { 
+      const parsed = JSON.parse(record.result); 
+      if (parsed) unpacked = parsed;
+    } catch(e) {}
   }
   return {
     ...unpacked,

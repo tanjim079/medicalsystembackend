@@ -6,7 +6,7 @@ export const getPatients = async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, name, email, created_at, role, patients(roll_number, registration_number, phone, guardian_phone, blood_group)')
+      .select('id, name, email, created_at, role, patients(roll_number, registration_number, phone, guardian_phone, blood_group), teachers(employee_id, phone, department, designation)')
       .in('role', ['student', 'teacher', 'officer', 'patient']);
 
     if (error) throw error;
@@ -31,22 +31,29 @@ export const getPatientById = async (req, res) => {
     console.log('Raw ID:', id, 'Length:', id.length);
     console.log('Is UUID:', isUUID);
 
-    if (!isUUID) {
-      console.log('Searching by roll_number:', patientId);
-      // Find patient by roll_number first
-      const { data: patientRecord, error: pError } = await supabase
-        .from('patients')
-        .select('id')
-        .eq('roll_number', patientId)
-        .maybeSingle();
+          if (!isUUID) {
+        console.log('Searching by roll_number or employee_id:', patientId);
+        let { data: patientRecord, error: pError } = await supabase
+          .from('patients')
+          .select('id')
+          .eq('roll_number', patientId).limit(1).maybeSingle();
+          
+        if (!patientRecord) {
+           const { data: teacherRecord } = await supabase
+             .from('teachers')
+             .select('id')
+             .eq('employee_id', patientId).limit(1).maybeSingle();
+           if (teacherRecord) {
+             patientRecord = teacherRecord;
+             pError = null;
+           }
+        }
         
-      console.log('Record found:', patientRecord, 'Error:', pError);
-
-      if (pError || !patientRecord) {
-        return res.status(404).json({ error: 'Patient not found', details: pError });
+        if (pError || !patientRecord) {
+          return res.status(404).json({ error: 'Patient not found' });
+        }
+        patientId = patientRecord.id;
       }
-      patientId = patientRecord.id;
-    }
 
     console.log('Found patient UUID:', patientId);
 
@@ -68,6 +75,20 @@ export const getPatientById = async (req, res) => {
       .select('*')
       .eq('id', patientId)
       .maybeSingle();
+
+    let specificData = patientData;
+    
+    // Check teachers table if not found in patients table
+    if (!specificData) {
+      const { data: teacherData } = await supabase
+        .from('teachers')
+        .select('*')
+        .eq('id', patientId)
+        .maybeSingle();
+      if (teacherData) {
+        specificData = teacherData;
+      }
+    }
 
     console.log('--- DEBUG GET PATIENT ---');
     const secretKeyExists = !!process.env.SUPABASE_SECRET_KEY;
@@ -93,13 +114,13 @@ export const getPatientById = async (req, res) => {
 
     // Calculate age from date_of_birth
     let calculatedAge = "N/A";
-    if (patientData && patientData.date_of_birth) {
-      const dob = new Date(patientData.date_of_birth);
+    if (specificData && specificData.date_of_birth) {
+      const dob = new Date(specificData.date_of_birth);
       const diffMs = Date.now() - dob.getTime();
       const ageDt = new Date(diffMs); 
       calculatedAge = Math.abs(ageDt.getUTCFullYear() - 1970);
-    } else if (patientData && patientData.age) {
-      calculatedAge = patientData.age; // fallback for older records
+    } else if (specificData && specificData.age) {
+      calculatedAge = specificData.age; // fallback for older records
     }
 
     // Combine everything into one big JSON object matching the UI
@@ -107,7 +128,7 @@ export const getPatientById = async (req, res) => {
       id: profile.id,
       email: profile.email,
       name: profile.name,
-      ...patientData, // adds phone, blood_group, guardian info, etc.
+      ...specificData, // adds phone, blood_group, guardian info, etc.
       age: calculatedAge,
       treatmentHistory: treatments || [],
       labReports: labReports || [],
@@ -188,19 +209,29 @@ export const updatePatient = async (req, res) => {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
     let patientId = id;
 
-    if (!isUUID) {
-      console.log('Searching by roll_number:', patientId);
-      const { data: patientRecord, error: pError } = await supabase
-        .from('patients')
-        .select('id')
-        .eq('roll_number', patientId)
-        .maybeSingle();
-
-      if (pError || !patientRecord) {
-        return res.status(404).json({ error: 'Patient not found by roll number' });
+          if (!isUUID) {
+        console.log('Searching by roll_number or employee_id:', patientId);
+        let { data: patientRecord, error: pError } = await supabase
+          .from('patients')
+          .select('id')
+          .eq('roll_number', patientId).limit(1).maybeSingle();
+          
+        if (!patientRecord) {
+           const { data: teacherRecord } = await supabase
+             .from('teachers')
+             .select('id')
+             .eq('employee_id', patientId).limit(1).maybeSingle();
+           if (teacherRecord) {
+             patientRecord = teacherRecord;
+             pError = null;
+           }
+        }
+        
+        if (pError || !patientRecord) {
+          return res.status(404).json({ error: 'Patient not found' });
+        }
+        patientId = patientRecord.id;
       }
-      patientId = patientRecord.id;
-    }
 
     // Now update the patients table
     const { data, error } = await supabase

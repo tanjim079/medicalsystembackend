@@ -90,3 +90,14 @@ CREATE TABLE IF NOT EXISTS public.bills (
     status TEXT NOT NULL,
     date TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Table: teachers
+CREATE TABLE IF NOT EXISTS public.teachers (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    designation TEXT NOT NULL,
+    department TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    phone TEXT,
+    "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
