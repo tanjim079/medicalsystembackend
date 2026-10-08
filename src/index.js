@@ -1,14 +1,34 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
+import morgan from 'morgan';
+
+import { env } from './config/env.js';
+import { logger } from './config/logger.js';
 import { swaggerSpec } from './config/swagger.js';
 import routes from './routes/index.js';
-
-dotenv.config();
+import { errorHandler } from './middleware/errorHandler.js';
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = env.PORT;
+
+// Security Headers
+app.use(helmet());
+
+// HTTP Request Logging
+app.use(morgan('dev', {
+  stream: { write: (message) => logger.info(message.trim()) }
+}));
+
+// Rate limiting: max 100 requests per 15 minutes per IP
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use('/api', limiter);
 
 app.use(cors());
 app.use(express.json());
@@ -25,17 +45,12 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use('/api', routes);
 
 app.get('/', (req, res) => {
-  res.send('RUET Medical Backend is running');
+  res.send('RUET Medical Backend is running securely');
 });
 
-app.get('/api/testenv', (req, res) => {
-  res.json({
-    secretKeyExists: !!process.env.SUPABASE_SECRET_KEY,
-    keyLength: process.env.SUPABASE_SECRET_KEY ? process.env.SUPABASE_SECRET_KEY.length : 0,
-    cwd: process.cwd()
-  });
-});
+// Global Error Handler must be the last middleware
+app.use(errorHandler);
 
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  logger.info(`[🚀] Server is running securely on port ${port}`);
 });

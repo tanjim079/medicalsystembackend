@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ruet-medical-backend
+    env: node
+    plan: free
+    region: singapore # Change to your preferred region (e.g. frankfurt, ohio)
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.x
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000 # Render assigns a port, our code reads process.env.PORT
+      - key: SUPABASE_URL
+        sync: false # Requires manual entry in Render dashboard
+      - key: SUPABASE_SECRET_KEY
+        sync: false # Requires manual entry in Render dashboard

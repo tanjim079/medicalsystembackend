@@ -1,21 +1,22 @@
 import express from 'express';
 import supabase from '../config/supabase.js';
+import { requireAuth, requireRole } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
 // GET /api/tests
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
   try {
     const { data, error } = await supabase.from('medical_tests').select('*');
     if (error) throw error;
     res.status(200).json(data);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    next(error);
   }
 });
 
 // POST /api/tests (admin/staff only theoretically)
-router.post('/', async (req, res) => {
+router.post('/', requireAuth, requireRole(['admin', 'staff']), async (req, res, next) => {
   try {
     const { data, error } = await supabase.from('medical_tests').insert([req.body]).select();
     if (error) throw error;

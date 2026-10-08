@@ -91,9 +91,12 @@ CREATE TABLE IF NOT EXISTS public.bills (
     date TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- User Role Type update
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'teacher';
+
 -- Table: teachers
 CREATE TABLE IF NOT EXISTS public.teachers (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY REFERENCES auth.users(id),
     name TEXT NOT NULL,
     designation TEXT NOT NULL,
     department TEXT NOT NULL,
@@ -101,3 +104,5 @@ CREATE TABLE IF NOT EXISTS public.teachers (
     phone TEXT,
     "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Note: Ensure Row Level Security (RLS) is disabled or appropriate policies are created.

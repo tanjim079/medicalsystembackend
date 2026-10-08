@@ -1,5 +1,7 @@
 import express from 'express';
 import { signup, login } from '../controllers/authController.js';
+import { validateRequest } from '../middleware/validateRequest.js';
+import { signupSchema, loginSchema } from '../validators/authValidators.js';
 
 const router = express.Router();
 
@@ -36,7 +38,7 @@ const router = express.Router();
  *       400:
  *         description: Bad request
  */
-router.post('/signup', signup);
+router.post('/signup', validateRequest(signupSchema), signup);
 
 /**
  * @swagger
@@ -68,6 +70,6 @@ router.post('/signup', signup);
  *       401:
  *         description: Unauthorized
  */
-router.post('/login', login);
+router.post('/login', validateRequest(loginSchema), login);
 
 export default router;

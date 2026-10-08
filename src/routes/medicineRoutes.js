@@ -1,6 +1,8 @@
 import express from 'express';
 import { getMedicines, updateMedicineStock, addMedicine } from '../controllers/medicineController.js';
 
+import { requireAuth, requireRole } from '../middleware/authMiddleware.js';
+
 const router = express.Router();
 
 /**
@@ -65,7 +67,7 @@ router.get('/', getMedicines);
  *       200:
  *         description: Medicine stock updated successfully
  */
-router.put('/:id', updateMedicineStock);
+router.put('/:id', requireAuth, requireRole(['admin', 'pharmacist', 'doctor']), updateMedicineStock);
 
 /**
  * @swagger
@@ -90,6 +92,6 @@ router.put('/:id', updateMedicineStock);
  *       201:
  *         description: Medicine added successfully
  */
-router.post('/', addMedicine);
+router.post('/', requireAuth, requireRole(['admin', 'pharmacist']), addMedicine);
 
 export default router;
