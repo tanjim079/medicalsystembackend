@@ -14,6 +14,9 @@ import { errorHandler } from './middleware/errorHandler.js';
 const app = express();
 const port = env.PORT;
 
+// CORS MUST be before rate limiter and other middlewares to handle preflight
+app.use(cors());
+
 // Security Headers
 app.use(helmet());
 
@@ -30,7 +33,6 @@ const limiter = rateLimit({
 });
 app.use('/api', limiter);
 
-app.use(cors());
 app.use(express.json());
 
 // Prevent browser caching for all API routes
