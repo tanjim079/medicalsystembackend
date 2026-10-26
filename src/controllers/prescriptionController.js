@@ -45,9 +45,28 @@ export const createPrescription = async (req, res) => {
     if (!payload.date) payload.date = new Date().toISOString();
     if (!payload.status) payload.status = 'pending';
     
-    if (!payload.patientName) {
-      const { data: pt } = await supabase.from('patients').select('name').eq('roll_number', payload.patientId).single();
-      payload.patientName = pt ? pt.name : 'Unknown Patient';
+    if (!payload.patientName || payload.patientName === 'Unknown Patient') {
+      try {
+        const { data: prof } = await supabase.from('profiles').select('name').eq('id', payload.patientId).maybeSingle();
+        if (prof?.name) {
+          payload.patientName = prof.name;
+        } else {
+          const { data: pt } = await supabase.from('patients').select('id, roll_number').eq('roll_number', payload.patientId).maybeSingle();
+          if (pt?.id) {
+            const { data: prof2 } = await supabase.from('profiles').select('name').eq('id', pt.id).maybeSingle();
+            if (prof2?.name) payload.patientName = prof2.name;
+          }
+          if (!payload.patientName || payload.patientName === 'Unknown Patient') {
+            const { data: tch } = await supabase.from('teachers').select('id, name').eq('employee_id', payload.patientId).maybeSingle();
+            if (tch?.name) payload.patientName = tch.name;
+          }
+        }
+      } catch (e) {
+        console.warn('Error resolving patient name in prescription creation:', e.message);
+      }
+      if (!payload.patientName) {
+        payload.patientName = 'Unknown Patient';
+      }
     }
     
     // Pack tests inside medicines JSONB

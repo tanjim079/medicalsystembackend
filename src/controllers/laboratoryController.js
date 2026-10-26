@@ -55,15 +55,18 @@ const unpackLabReport = (record) => {
       if (parsed) unpacked = parsed;
     } catch(e) {}
   }
+  const isFinalized = record.validated || unpacked.status === 'Completed' || unpacked.status === 'Validated';
   return {
     ...unpacked,
     id: record.id || '',
     patientId: record.patient_id || unpacked.patientId || '',
     patientName: unpacked.patientName || 'Unknown Patient',
     testName: record.test_name || unpacked.testName || 'Unknown Test',
-    status: record.validated ? 'Validated' : (unpacked.status || 'Awaiting Validation'),
+    status: isFinalized ? 'Completed' : (unpacked.status || 'Pending'),
     date: record.date || unpacked.date || new Date().toISOString().split('T')[0],
-    requestedAt: unpacked.requestedAt || new Date().toISOString()
+    requestedAt: unpacked.requestedAt || new Date().toISOString(),
+    completedAt: unpacked.completedAt || unpacked.validatedAt || record.createdAt || new Date().toISOString(),
+    validatedAt: unpacked.validatedAt || unpacked.completedAt || record.createdAt || new Date().toISOString()
   };
 };
 
@@ -80,17 +83,27 @@ export const getLabReports = async (req, res) => {
 export const createLabReport = async (req, res) => {
   try {
     const frontendPayload = { ...req.body };
+    const isCompleted = frontendPayload.status === 'Completed' || frontendPayload.status === 'Validated' || !frontendPayload.status;
     const dbPayload = {
       patient_id: null, // Bypass strict UUID constraint (student ID is stored in result)
       test_name: frontendPayload.testName || 'Unknown',
-      result: JSON.stringify(frontendPayload),
-      validated: frontendPayload.status === 'Validated',
+      result: JSON.stringify({ ...frontendPayload, status: isCompleted ? 'Completed' : frontendPayload.status }),
+      validated: isCompleted,
       date: new Date().toISOString().split('T')[0]
     };
 
     const { data, error } = await supabase.from('lab_reports').insert([dbPayload]).select();
     if (error) throw error;
     
+    // Automatically update the matching lab request status to Completed
+    if (frontendPayload.requestId) {
+      try {
+        await supabase.from('lab_requests').update({ status: 'Completed' }).eq('id', frontendPayload.requestId);
+      } catch (reqErr) {
+        console.error('Failed to update matching lab request status:', reqErr);
+      }
+    }
+
     res.status(201).json(unpackLabReport(data[0]));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -111,9 +124,10 @@ export const updateLabReport = async (req, res) => {
     }
     
     const mergedJson = { ...existingJson, ...req.body };
+    const isCompleted = mergedJson.status === 'Completed' || mergedJson.status === 'Validated' || req.body.status === 'Completed' || req.body.status === 'Validated' || existing[0].validated;
     const dbPayload = {
-      result: JSON.stringify(mergedJson),
-      validated: mergedJson.status === 'Validated' || req.body.status === 'Validated'
+      result: JSON.stringify({ ...mergedJson, status: isCompleted ? 'Completed' : (mergedJson.status || 'Pending') }),
+      validated: isCompleted
     };
     
     const { data, error } = await supabase.from('lab_reports').update(dbPayload).eq('id', id).select();

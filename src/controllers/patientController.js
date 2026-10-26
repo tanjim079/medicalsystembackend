@@ -66,7 +66,7 @@ export const getPatientById = async (req, res) => {
 
     if (profileError) throw profileError;
     if (!profile) {
-      return res.status(404).json({ error: 'Patient profile not found in database' });
+      console.warn('Patient profile not found in profiles table, checking fallbacks');
     }
 
     // 2. Fetch Patient Specific Data
@@ -90,7 +90,24 @@ export const getPatientById = async (req, res) => {
       }
     }
 
-    console.log('--- DEBUG GET PATIENT ---');
+    if (!profile && !specificData) {
+      return res.status(404).json({ error: 'Patient profile not found in database' });
+    }
+
+    let patientName = profile?.name || specificData?.name || null;
+    let patientEmail = profile?.email || null;
+
+    if (!patientName) {
+      try {
+        const { data: authUser } = await supabase.auth.admin.getUserById(patientId);
+        if (authUser?.user) {
+          patientName = authUser.user.user_metadata?.name || null;
+          patientEmail = patientEmail || authUser.user.email;
+        }
+      } catch (authErr) {
+        console.warn('Auth user lookup fallback error:', authErr.message);
+      }
+    }
     const secretKeyExists = !!process.env.SUPABASE_SECRET_KEY;
     console.log('Query ID:', patientId);
     console.log('Secret Key exists?', secretKeyExists);
@@ -125,10 +142,11 @@ export const getPatientById = async (req, res) => {
 
     // Combine everything into one big JSON object matching the UI
     const comprehensiveData = {
-      id: profile.id,
-      email: profile.email,
-      name: profile.name,
+      id: profile ? profile.id : patientId,
+      email: patientEmail,
+      name: (patientName || profile?.name || 'Unknown'),
       ...specificData, // adds phone, blood_group, guardian info, etc.
+      name: (patientName || specificData?.name || profile?.name || 'Unknown'),
       age: calculatedAge,
       treatmentHistory: treatments || [],
       labReports: labReports || [],
