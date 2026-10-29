@@ -123,11 +123,42 @@ export const getPatientById = async (req, res) => {
       .order('date', { ascending: false });
 
     // 4. Fetch Lab Reports
-    const { data: labReports, error: labError } = await supabase
+    const { data: rawLabReports, error: labError } = await supabase
       .from('lab_reports')
       .select('*')
-      .eq('patientId', patientId)
-      .order('createdAt', { ascending: false });
+      .order('date', { ascending: false });
+
+    let labReports = [];
+    if (!labError && rawLabReports) {
+      const unpacked = rawLabReports.map(record => {
+        let json = {};
+        if (record.result) {
+          try { json = JSON.parse(record.result); } catch (e) {}
+        }
+        const isFinal = record.validated || json.status === 'Completed' || json.status === 'Validated';
+        return {
+          ...json,
+          id: record.id || json.id || '',
+          patientId: record.patient_id || json.patientId || '',
+          patientName: json.patientName || patientName || 'Unknown Patient',
+          testName: record.test_name || json.testName || 'Unknown Test',
+          status: isFinal ? 'Completed' : (json.status || 'Pending'),
+          date: record.date || json.date || new Date().toISOString().split('T')[0],
+          requestedAt: json.requestedAt || new Date().toISOString(),
+          completedAt: json.completedAt || json.validatedAt || record.date || new Date().toISOString(),
+          validatedAt: json.validatedAt || json.completedAt || record.date || new Date().toISOString()
+        };
+      });
+
+      const pIdLower = String(patientId).toLowerCase();
+      const rollLower = specificData?.roll_number ? String(specificData.roll_number).toLowerCase() : '';
+      const empLower = specificData?.employee_id ? String(specificData.employee_id).toLowerCase() : '';
+
+      labReports = unpacked.filter(r => {
+        const rPat = String(r.patientId || '').toLowerCase();
+        return rPat === pIdLower || (rollLower && rPat === rollLower) || (empLower && rPat === empLower);
+      });
+    }
 
     // Calculate age from date_of_birth
     let calculatedAge = "N/A";
