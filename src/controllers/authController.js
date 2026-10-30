@@ -52,3 +52,29 @@ export const login = async (req, res, next) => {
     next(error);
   }
 };
+
+// @desc    Refresh session token
+// @route   POST /api/auth/refresh
+export const refreshToken = async (req, res, next) => {
+  const { refresh_token } = req.body;
+
+  if (!refresh_token) {
+    return res.status(400).json({ error: 'Refresh token is required' });
+  }
+
+  try {
+    const { data, error } = await supabase.auth.refreshSession({
+      refresh_token,
+    });
+
+    if (error) throw error;
+
+    res.status(200).json({
+      message: 'Token refreshed successfully',
+      session: data.session,
+      user: data.user,
+    });
+  } catch (error) {
+    res.status(401).json({ error: error.message || 'Invalid or expired refresh token' });
+  }
+};
