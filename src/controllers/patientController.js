@@ -114,12 +114,15 @@ export const getPatientById = async (req, res) => {
     console.log('Patient Data Result:', patientData);
     console.log('-------------------------');
 
-    // 3. Fetch Treatment History
     // 3. Fetch Treatment History (from prescriptions table)
+    const matchPatientIds = [patientId];
+    if (specificData?.roll_number) matchPatientIds.push(String(specificData.roll_number));
+    if (specificData?.employee_id) matchPatientIds.push(String(specificData.employee_id));
+
     const { data: treatments, error: treatmentsError } = await supabase
       .from('prescriptions')
       .select('id, date, diagnosis, doctorName')
-      .eq('patientId', patientId)
+      .in('patientId', matchPatientIds)
       .order('date', { ascending: false });
 
     // 4. Fetch Lab Reports
