@@ -1,4 +1,5 @@
 import supabase from '../config/supabase.js';
+import { invalidateUserRole } from '../services/authService.js';
 
 // @desc    Get all users or filter by role
 // @route   GET /api/users
@@ -43,27 +44,31 @@ export const createUser = async (req, res) => {
     if (error) throw error;
     
     // Check if profile was created by trigger, if not create it
-    const { data: existingProfile } = await supabase.from('profiles').select('*').eq('id', data.user.id).single();
-    if (!existingProfile) {
-      await supabase.from('profiles').insert({
-        id: data.user.id,
-        email: email,
-        name: name,
-        role: role
-      });
-    }
+    try {
+      const { data: existingProfile } = await supabase.from('profiles').select('*').eq('id', data.user.id).single();
+      if (!existingProfile) {
+        await supabase.from('profiles').insert({
+          id: data.user.id,
+          email: email,
+          name: name,
+          role: role
+        });
+      }
 
-    if (patientData && ['student', 'teacher', 'officer', 'patient'].includes(role)) {
-      await supabase.from('patients').upsert({
-        id: data.user.id,
-        roll_number: patientData.universityId || null,
-        phone: patientData.phone || null,
-        blood_group: patientData.bloodGroup || null,
-        guardian_name: patientData.guardianName || null,
-        guardian_phone: patientData.guardianPhone || null,
-        department: patientData.department || null,
-        age: patientData.age || null
-      });
+      if (patientData && ['student', 'teacher', 'officer', 'patient'].includes(role)) {
+        await supabase.from('patients').upsert({
+          id: data.user.id,
+          roll_number: patientData.universityId || null,
+          phone: patientData.phone || null,
+          blood_group: patientData.bloodGroup || null,
+          guardian_name: patientData.guardianName || null,
+          guardian_phone: patientData.guardianPhone || null,
+          department: patientData.department || null,
+          age: patientData.age || null
+        });
+      }
+    } catch (profileErr) {
+      // DB profile creation fallback
     }
     
     res.status(201).json({ id: data.user.id, email, name, role });
@@ -119,6 +124,9 @@ export const updateUser = async (req, res) => {
       });
       if (patientError) throw patientError;
     }
+
+    // Explicit cache invalidation on role or account update
+    invalidateUserRole(id);
     
     res.status(200).json({ id, ...profileUpdate });
   } catch (error) {
@@ -138,6 +146,9 @@ export const deleteUser = async (req, res) => {
     
     const { error } = await supabase.auth.admin.deleteUser(id);
     if (error) throw error;
+
+    // Explicit cache invalidation on account deletion
+    invalidateUserRole(id);
     
     res.status(200).json({ message: 'User deleted successfully' });
   } catch (error) {

@@ -32,8 +32,8 @@ router.use('/tests', testRoutes);
 // Apply authentication middleware for all subsequent routes
 router.use(requireAuth);
 
-// Mount protected routes
-router.use('/users', userRoutes);
+// Mount protected routes (administrative routes enforce strict fresh session validation)
+router.use('/users', requireAuth({ requireFreshSession: true }), userRoutes);
 router.use('/patients', patientRoutes);
 router.use('/appointments', appointmentRoutes);
 router.use('/prescriptions', prescriptionRoutes);

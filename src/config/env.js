@@ -24,6 +24,7 @@ const envSchema = z.object({
   // Fallback if needed, though secret key is preferred for backend
   SUPABASE_ANON_KEY: z.string().optional(),
   SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
+  SUPABASE_JWKS_URL: z.string().url().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 });
 

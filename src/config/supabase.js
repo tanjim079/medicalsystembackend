@@ -34,10 +34,64 @@ export const authClient = createClient(supabaseUrl, pubKey, {
   }
 });
 
+// Test mock hooks for deterministic offline testing (strictly disabled in production)
+let testAuthHandlers = null;
+let testDbHandler = null;
+
+export const setTestAuthHandlers = (handlers) => {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Security Error: setTestAuthHandlers cannot be invoked in production.');
+  }
+  testAuthHandlers = handlers;
+};
+
+export const setTestDbHandler = (handler) => {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Security Error: setTestDbHandler cannot be invoked in production.');
+  }
+  testDbHandler = handler;
+};
+
+// Wrap supabase.from for deterministic offline testing without network delays
+const originalFrom = supabase.from.bind(supabase);
+supabase.from = (table) => {
+  if (process.env.NODE_ENV !== 'production' && testDbHandler) {
+    return testDbHandler(table);
+  }
+  return originalFrom(table);
+};
+
 // Delegate user authentication methods to authClient so the primary DB client's
 // service_role authorization header is NEVER overwritten by user session tokens
-supabase.auth.signInWithPassword = (credentials) => authClient.auth.signInWithPassword(credentials);
-supabase.auth.signUp = (credentials) => authClient.auth.signUp(credentials);
-supabase.auth.refreshSession = (params) => authClient.auth.refreshSession(params);
+supabase.auth.signInWithPassword = async (credentials) => {
+  if (process.env.NODE_ENV !== 'production' && testAuthHandlers?.signInWithPassword) {
+    return testAuthHandlers.signInWithPassword(credentials);
+  }
+  return authClient.auth.signInWithPassword(credentials);
+};
+
+supabase.auth.signUp = async (credentials) => {
+  if (process.env.NODE_ENV !== 'production' && testAuthHandlers?.signUp) {
+    return testAuthHandlers.signUp(credentials);
+  }
+  return authClient.auth.signUp(credentials);
+};
+
+supabase.auth.refreshSession = async (params) => {
+  if (process.env.NODE_ENV !== 'production' && testAuthHandlers?.refreshSession) {
+    return testAuthHandlers.refreshSession(params);
+  }
+  return authClient.auth.refreshSession(params);
+};
+
+if (supabase.auth.admin) {
+  const originalCreateUser = supabase.auth.admin.createUser?.bind(supabase.auth.admin);
+  supabase.auth.admin.createUser = async (attrs) => {
+    if (process.env.NODE_ENV !== 'production' && testAuthHandlers?.adminCreateUser) {
+      return testAuthHandlers.adminCreateUser(attrs);
+    }
+    return originalCreateUser ? originalCreateUser(attrs) : { data: null, error: new Error('Not supported') };
+  };
+}
 
 export default supabase;

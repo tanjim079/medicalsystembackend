@@ -18,7 +18,8 @@ export const validateRequest = (schema) => {
       next();
     } catch (err) {
       if (err.name === 'ZodError') {
-        const errors = err.errors.map((e) => ({
+        const issues = err.issues || err.errors || [];
+        const errors = issues.map((e) => ({
           field: e.path.join('.'),
           message: e.message,
         }));

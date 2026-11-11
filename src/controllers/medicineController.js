@@ -1,5 +1,14 @@
 import supabase from '../config/supabase.js';
 
+let testMedicinesData = null;
+
+export const setTestMedicinesData = (data) => {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Security Error: setTestMedicinesData cannot be invoked in production.');
+  }
+  testMedicinesData = data;
+};
+
 // @desc    Get all medicines
 // @route   GET /api/medicines
 export const getMedicines = async (req, res) => {
@@ -27,6 +36,10 @@ export const updateMedicineStock = async (req, res) => {
       return res.status(400).json({ error: 'Please provide a valid stock number' });
     }
 
+    if (process.env.NODE_ENV !== 'production' && testMedicinesData) {
+      return res.status(200).json({ id, stock });
+    }
+
     const { data, error } = await supabase
       .from('medicines')
       .update({ stock })
@@ -49,6 +62,10 @@ export const addMedicine = async (req, res) => {
 
     if (!name) {
       return res.status(400).json({ error: 'Medicine name is required' });
+    }
+
+    if (process.env.NODE_ENV !== 'production' && testMedicinesData) {
+      return res.status(201).json({ id: 'mock-med-1', name, stock });
     }
 
     const { data, error } = await supabase

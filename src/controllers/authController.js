@@ -5,15 +5,21 @@ import supabase from '../config/supabase.js';
 export const signup = async (req, res, next) => {
   const { email, password, role, name } = req.body;
 
+  const ALLOWED_PUBLIC_ROLES = ['patient', 'student'];
+  const safeRole = role || 'patient';
+  if (!ALLOWED_PUBLIC_ROLES.includes(safeRole)) {
+    return res.status(400).json({ error: 'Privileged role assignment is forbidden on public registration.' });
+  }
+
   try {
-    // 1. Sign up the user in Supabase Auth
+    // 1. Sign up the user in Supabase Auth with unprivileged safeRole
     const { data: authData, error: authError } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: {
           name: name,
-          role: role // 'patient' or 'doctor'
+          role: safeRole
         }
       }
     });

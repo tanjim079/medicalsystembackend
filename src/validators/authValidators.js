@@ -5,10 +5,9 @@ export const signupSchema = z.object({
     email: z.string().email('Invalid email address'),
     password: z.string().min(6, 'Password must be at least 6 characters long'),
     name: z.string().min(2, 'Name is required'),
-    role: z.enum(['patient', 'doctor', 'admin', 'pharmacist', 'pathologist', 'staff', 'student', 'teacher'], {
-      required_error: 'Role is required',
-      invalid_type_error: 'Invalid role type',
-    }),
+    role: z.enum(['patient', 'student'], {
+      invalid_type_error: 'Role must be either student or patient',
+    }).optional().default('patient'),
   }),
 });
 

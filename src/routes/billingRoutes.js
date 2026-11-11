@@ -1,5 +1,6 @@
 import express from 'express';
 import supabase from '../config/supabase.js';
+import { requireRole } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireRole(['admin', 'receptionist']), async (req, res) => {
   try {
     const { data, error } = await supabase.from('bills').insert([req.body]).select();
     if (error) throw error;
@@ -23,7 +24,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id/status', async (req, res) => {
+router.put('/:id/status', requireRole(['admin', 'receptionist']), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;

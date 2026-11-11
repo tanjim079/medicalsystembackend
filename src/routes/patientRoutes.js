@@ -109,9 +109,7 @@ router.post('/', createPatient);
  *       400:
  *         description: Bad request
  */
-router.get('/', getPatients);
 router.get('/:id', getPatientById);
 router.put('/:id', updatePatient);
-router.post('/', createPatient);
 
 export default router;
