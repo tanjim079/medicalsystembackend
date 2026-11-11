@@ -17,6 +17,13 @@ import medicineRoutes from './medicineRoutes.js';
 const router = express.Router();
 
 // Mount public routes
+router.get('/health', (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.status(200).json({
+    status: 'ok',
+    service: 'ruet-medical-backend'
+  });
+});
 router.use('/auth', authRoutes);
 router.use('/directory', directoryRoutes);
 router.use('/medicines', medicineRoutes);

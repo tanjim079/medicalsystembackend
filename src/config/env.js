@@ -1,7 +1,21 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Load environment variables from cwd, or fallback to backend directory .env
 dotenv.config();
+if (!process.env.SUPABASE_URL) {
+  dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+}
+
+// In test environment, provide fallback mock credentials if none configured
+if (process.env.NODE_ENV === 'test') {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder-test-supabase.co';
+  process.env.SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || 'placeholder-test-secret-key';
+}
 
 const envSchema = z.object({
   PORT: z.string().optional().default('5000'),
