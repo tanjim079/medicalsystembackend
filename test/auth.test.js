@@ -185,7 +185,8 @@ describe('RUET MediSys — Phase 1, Step 2: Authentication Security & Regression
       '00000000-0000-0000-0000-000000000001': 'student',
       '11111111-1111-1111-1111-111111111111': 'student',
       '33333333-3333-3333-3333-333333333333': 'doctor',
-      'admin-legit-uuid': 'admin'
+      'admin-legit-uuid': 'admin',
+      'mkh-uuid-5555-5555-5555-555555555555': 'teacher'
     });
     setTestRelationships({
       '33333333-3333-3333-3333-333333333333': ['11111111-1111-1111-1111-111111111111']
@@ -193,13 +194,34 @@ describe('RUET MediSys — Phase 1, Step 2: Authentication Security & Regression
     setTestIdentifiers({
       '11111111-1111-1111-1111-111111111111': ['11111111-1111-1111-1111-111111111111', '2204001'],
       '22222222-2222-2222-2222-222222222222': ['22222222-2222-2222-2222-222222222222', '2204002'],
-      '44444444-4444-4444-4444-444444444444': ['44444444-4444-4444-4444-444444444444', '2204004']
+      '44444444-4444-4444-4444-444444444444': ['44444444-4444-4444-4444-444444444444', '2204004'],
+      'mkh-uuid-5555-5555-5555-555555555555': ['mkh-uuid-5555-5555-5555-555555555555', 'MKH']
     });
     setTestPatientsData({
       '11111111-1111-1111-1111-111111111111': {
         id: '11111111-1111-1111-1111-111111111111',
         name: 'Genuine Student',
-        role: 'student'
+        roll_number: '2204001',
+        role: 'student',
+        blood_group: 'B+',
+        age: 21,
+        treatmentHistory: [
+          { id: 'tx-1', date: '2026-01-10', diagnosis: 'Fever', doctorName: 'Dr. Rahman' }
+        ]
+      },
+      'mkh-uuid-5555-5555-5555-555555555555': {
+        id: 'mkh-uuid-5555-5555-5555-555555555555',
+        name: 'Prof. MKH',
+        employee_id: 'MKH',
+        role: 'teacher',
+        department: 'CSE',
+        designation: 'Professor',
+        phone: '01711000000',
+        blood_group: 'A+',
+        age: 48,
+        treatmentHistory: [
+          { id: 'tx-mkh-1', date: '2025-05-15', diagnosis: 'Hypertension', doctorName: 'Dr. Previous' }
+        ]
       }
     });
     setTestMedicinesData(true);
@@ -637,5 +659,122 @@ describe('RUET MediSys — Phase 1, Step 2: Authentication Security & Regression
     } finally {
       process.env.NODE_ENV = prevEnv;
     }
+  });
+
+  // TEST 25
+  test('25. Existing authorized doctor-patient relationship returns full clinical records', async () => {
+    const doctorId = '33333333-3333-3333-3333-333333333333';
+    const doctorToken = await createToken({
+      sub: doctorId,
+      app_metadata: { role: 'doctor' },
+      user_metadata: { role: 'doctor', name: 'Dr. Rahman' }
+    });
+
+    const res = await request(app, {
+      url: '/api/patients/11111111-1111-1111-1111-111111111111',
+      headers: { Authorization: `Bearer ${doctorToken}` }
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json?.id, '11111111-1111-1111-1111-111111111111');
+    assert.equal(res.json?.name, 'Genuine Student');
+    assert.equal(Array.isArray(res.json?.treatmentHistory), true);
+    assert.equal(res.json?.treatmentHistory.length, 1);
+  });
+
+  // TEST 26
+  test('26. New walk-in patient search via /api/patients/search?query=MKH returns 200 with demographics and redacted medical history', async () => {
+    const doctorId = '33333333-3333-3333-3333-333333333333';
+    const doctorToken = await createToken({
+      sub: doctorId,
+      app_metadata: { role: 'doctor' },
+      user_metadata: { role: 'doctor', name: 'Dr. Rahman' }
+    });
+
+    const res = await request(app, {
+      url: '/api/patients/search?query=MKH',
+      headers: { Authorization: `Bearer ${doctorToken}` }
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json?.employee_id, 'MKH');
+    assert.equal(res.json?.name, 'Prof. MKH');
+    assert.equal(res.json?.department, 'CSE');
+    assert.equal(res.json?.designation, 'Professor');
+    assert.equal(res.json?.hasClinicalRelationship, false, 'Doctor has no prior relationship with MKH');
+    assert.deepEqual(res.json?.treatmentHistory, [], 'Medical history must be redacted for walk-in patient without clinical relationship');
+    assert.deepEqual(res.json?.labReports, [], 'Lab reports must be redacted for walk-in patient without clinical relationship');
+  });
+
+  // TEST 27
+  test('27. Doctor accessing unrelated full medical history via GET /api/patients/:id returns 403 Forbidden', async () => {
+    const doctorId = '33333333-3333-3333-3333-333333333333';
+    const doctorToken = await createToken({
+      sub: doctorId,
+      app_metadata: { role: 'doctor' },
+      user_metadata: { role: 'doctor', name: 'Dr. Rahman' }
+    });
+
+    // Attempting direct access to full clinical record of MKH without relationship returns 403
+    const res = await request(app, {
+      url: '/api/patients/MKH',
+      headers: { Authorization: `Bearer ${doctorToken}` }
+    });
+
+    assert.equal(res.statusCode, 403, 'Direct access to full clinical record without relationship must be forbidden');
+    assert.match(res.json?.error, /clinical relationship/i);
+  });
+
+  // TEST 28
+  test('28. /api/patients/search with empty query returns 400 Bad Request', async () => {
+    const doctorId = '33333333-3333-3333-3333-333333333333';
+    const doctorToken = await createToken({
+      sub: doctorId,
+      app_metadata: { role: 'doctor' },
+      user_metadata: { role: 'doctor', name: 'Dr. Rahman' }
+    });
+
+    const res = await request(app, {
+      url: '/api/patients/search?query=',
+      headers: { Authorization: `Bearer ${doctorToken}` }
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.match(res.json?.error, /query.*required/i);
+  });
+
+  // TEST 29
+  test('29. /api/patients/search?query=NONEXISTENT_999 returns 404 Not Found', async () => {
+    const doctorId = '33333333-3333-3333-3333-333333333333';
+    const doctorToken = await createToken({
+      sub: doctorId,
+      app_metadata: { role: 'doctor' },
+      user_metadata: { role: 'doctor', name: 'Dr. Rahman' }
+    });
+
+    const res = await request(app, {
+      url: '/api/patients/search?query=NONEXISTENT_999',
+      headers: { Authorization: `Bearer ${doctorToken}` }
+    });
+
+    assert.equal(res.statusCode, 404);
+    assert.match(res.json?.error, /Patient not found/i);
+  });
+
+  // TEST 30
+  test('30. Unauthorized student accessing /api/patients/search returns 403 Forbidden', async () => {
+    const studentToken = await createToken({
+      sub: '11111111-1111-1111-1111-111111111111',
+      app_metadata: { role: 'student' },
+      user_metadata: { role: 'student', name: 'Genuine Student' }
+    });
+
+    const res = await request(app, {
+      url: '/api/patients/search?query=MKH',
+      headers: { Authorization: `Bearer ${studentToken}` }
+    });
+
+    assert.equal(res.statusCode, 403, 'Students must not be permitted to perform directory searches');
+    assert.match(res.json?.error, /Forbidden/i);
   });
 });

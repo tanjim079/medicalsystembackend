@@ -1,5 +1,5 @@
 import express from 'express';
-import { getPatients, getPatientById, createPatient, updatePatient } from '../controllers/patientController.js';
+import { getPatients, searchPatients, getPatientById, createPatient, updatePatient } from '../controllers/patientController.js';
 
 const router = express.Router();
 
@@ -56,6 +56,33 @@ const router = express.Router();
  */
 router.get('/', getPatients);
 router.post('/', createPatient);
+
+/**
+ * @swagger
+ * /patients/search:
+ *   get:
+ *     summary: Search patient by identifier, roll number, or employee ID (demographics projection)
+ *     tags: [Patients]
+ *     parameters:
+ *       - in: query
+ *         name: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Search query (roll number, employee ID, UUID, name, or email)
+ *     responses:
+ *       200:
+ *         description: Patient demographic information
+ *       400:
+ *         description: Query parameter required
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Access forbidden for non-staff roles
+ *       404:
+ *         description: Patient not found
+ */
+router.get('/search', searchPatients);
 
 /**
  * @swagger
