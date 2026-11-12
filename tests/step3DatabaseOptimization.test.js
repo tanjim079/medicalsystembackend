@@ -1132,4 +1132,92 @@ describe('RUET MediSys — Phase 1, Step 3: Supabase Database Query Optimization
     assert.equal(res.statusCode, 404);
     assert.equal(res.json.error, 'Patient not found');
   });
+
+  test('28. Non-UUID patient identifiers are strictly excluded from patient_id UUID column filters (preventing 22P02 invalid input syntax for type uuid)', async () => {
+    setTestPatientsData(null);
+    let capturedOrFilter = null;
+    let capturedInFilter = null;
+
+    setTestDbHandler((table) => {
+      const builder = {
+        select: () => builder,
+        eq: () => builder,
+        in: (field, values) => {
+          if (table === 'lab_reports' && field === 'patient_id') {
+            capturedInFilter = values;
+            // If any non-UUID value is passed to patient_id.in, throw PostgreSQL 22P02
+            for (const v of values) {
+              if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) {
+                throw new Error(`invalid input syntax for type uuid: "${v}"`);
+              }
+            }
+          }
+          return builder;
+        },
+        or: (filterStr) => {
+          if (table === 'lab_reports') {
+            capturedOrFilter = filterStr;
+            // If patient_id.in or patient_id.eq contains non-UUID string, throw PostgreSQL 22P02
+            if (filterStr.includes('patient_id.in') || filterStr.includes('patient_id.eq')) {
+              const matches = filterStr.match(/patient_id\.(?:in\.\(([^)]+)\)|eq\.([^,]+))/);
+              if (matches) {
+                const rawList = (matches[1] || matches[2] || '').split(',');
+                for (const item of rawList) {
+                  if (item && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item)) {
+                    throw new Error(`invalid input syntax for type uuid: "${item}"`);
+                  }
+                }
+              }
+            }
+          }
+          return builder;
+        },
+        order: () => builder,
+        range: () => builder,
+        then: (resolve) => {
+          if (table === 'lab_reports') {
+            return resolve({
+              data: [
+                {
+                  id: 'lab-2204002-1',
+                  patient_id: studentAId,
+                  test_name: 'CBC',
+                  result: JSON.stringify({ patientId: '2204002', status: 'Completed' }),
+                  validated: true,
+                  date: '2026-11-12'
+                }
+              ],
+              count: 1,
+              error: null
+            });
+          }
+          return resolve({ data: [], error: null });
+        }
+      };
+      return builder;
+    });
+
+    // 1. Test GET /api/laboratory/reports?patientId=2204002
+    const resListing = await request(app, {
+      method: 'GET',
+      url: '/api/laboratory/reports?patientId=2204002',
+      headers: { authorization: `Bearer ${doctorAToken}` }
+    }, '127.0.0.80');
+
+    assert.equal(resListing.statusCode, 200);
+    assert.ok(capturedOrFilter);
+    assert.ok(!capturedOrFilter.includes('patient_id.eq.2204002'), 'Must not compare non-UUID roll number against UUID column patient_id');
+    assert.ok(capturedOrFilter.includes('result.ilike.%"patientId":"2204002"%'));
+
+    // 2. Test fetchTargetedLabReports with roll number in matchPatientIds
+    capturedOrFilter = null;
+    const { fetchTargetedLabReports } = await import('../src/controllers/patientController.js');
+    const reports = await fetchTargetedLabReports([studentAId, '2204002'], '2204002', null);
+
+    assert.ok(Array.isArray(reports));
+    assert.equal(reports.length, 1);
+    assert.ok(capturedOrFilter);
+    assert.ok(capturedOrFilter.includes(`patient_id.in.(${studentAId})`), 'Must only include valid UUID in patient_id.in');
+    assert.ok(!capturedOrFilter.includes('2204002)'), 'Must not include roll number 2204002 in patient_id.in');
+  });
 });

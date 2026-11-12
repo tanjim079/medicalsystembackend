@@ -58,18 +58,20 @@ function unpackLabReports(rawReports, patientId, specificData, fallbackPatientNa
  * Supports complete history retrieval and safe pagination without silently dropping older records.
  * Fails closed on database errors to prevent partial histories from masquerading as complete histories.
  */
-async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, options = {}) {
+export async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, options = {}) {
   const filterClauses = [];
   if (matchPatientIds && matchPatientIds.length > 0) {
-    filterClauses.push(`patient_id.in.(${matchPatientIds.join(',')})`);
+    // Only valid UUIDs can be compared against the PostgreSQL UUID column patient_id
+    const uuidList = matchPatientIds.filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (uuidList.length > 0) {
+      filterClauses.push(`patient_id.in.(${uuidList.join(',')})`);
+    }
     // Also cover unlinked legacy reports where patient UUID was recorded inside JSON
-    for (const pid of matchPatientIds) {
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pid)) {
-        filterClauses.push(`result.ilike.%"patientId":"${pid}"%`);
-        filterClauses.push(`result.ilike.%"patientId": "${pid}"%`);
-        filterClauses.push(`result.ilike.%"patient_id":"${pid}"%`);
-        filterClauses.push(`result.ilike.%"patient_id": "${pid}"%`);
-      }
+    for (const pid of uuidList) {
+      filterClauses.push(`result.ilike.%"patientId":"${pid}"%`);
+      filterClauses.push(`result.ilike.%"patientId": "${pid}"%`);
+      filterClauses.push(`result.ilike.%"patient_id":"${pid}"%`);
+      filterClauses.push(`result.ilike.%"patient_id": "${pid}"%`);
     }
   }
   // Exact JSON token matching ensuring no substring false-positives (e.g. roll '725' vs '1725')
@@ -93,7 +95,10 @@ async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, 
   if (filterClauses.length > 0 && typeof query.or === 'function') {
     query = query.or(filterClauses.join(','));
   } else if (matchPatientIds && matchPatientIds.length > 0 && typeof query.in === 'function') {
-    query = query.in('patient_id', matchPatientIds);
+    const uuidList = matchPatientIds.filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (uuidList.length > 0) {
+      query = query.in('patient_id', uuidList);
+    }
   }
 
   // Stable deterministic chronological ordering with unique primary-key tie-breaker
@@ -132,7 +137,10 @@ async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, 
       if (filterClauses.length > 0 && typeof chunkQuery.or === 'function') {
         chunkQuery = chunkQuery.or(filterClauses.join(','));
       } else if (matchPatientIds && matchPatientIds.length > 0 && typeof chunkQuery.in === 'function') {
-        chunkQuery = chunkQuery.in('patient_id', matchPatientIds);
+        const uuidList = matchPatientIds.filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+        if (uuidList.length > 0) {
+          chunkQuery = chunkQuery.in('patient_id', uuidList);
+        }
       }
       if (typeof chunkQuery.order === 'function') {
         chunkQuery = chunkQuery.order('date', { ascending: false }).order('id', { ascending: false });

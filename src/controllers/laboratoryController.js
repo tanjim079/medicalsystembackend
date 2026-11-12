@@ -127,7 +127,7 @@ export const getLabReports = async (req, res) => {
       if (isUUID && typeof query.eq === 'function') {
         query = query.eq('patient_id', patientId);
       } else if (typeof query.or === 'function') {
-        query = query.or(`patient_id.eq.${patientId},result.ilike.%"patientId":"${patientId}"%`);
+        query = query.or(`result.ilike.%"patientId":"${patientId}"%,result.ilike.%"patientId": "${patientId}"%,result.ilike.%"patient_id":"${patientId}"%,result.ilike.%"patient_id": "${patientId}"%`);
       }
     }
 
