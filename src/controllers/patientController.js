@@ -88,7 +88,7 @@ async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, 
 
   let query = supabase
     .from('lab_reports')
-    .select('id, patient_id, test_name, result, validated, date, createdAt', { count: 'exact' });
+    .select('id, patient_id, test_name, result, validated, date', { count: 'exact' });
 
   if (filterClauses.length > 0 && typeof query.or === 'function') {
     query = query.or(filterClauses.join(','));
@@ -128,7 +128,7 @@ async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, 
     while (allData.length < totalCount && currentOffset < 10000) {
       let chunkQuery = supabase
         .from('lab_reports')
-        .select('id, patient_id, test_name, result, validated, date, createdAt');
+        .select('id, patient_id, test_name, result, validated, date');
       if (filterClauses.length > 0 && typeof chunkQuery.or === 'function') {
         chunkQuery = chunkQuery.or(filterClauses.join(','));
       } else if (matchPatientIds && matchPatientIds.length > 0 && typeof chunkQuery.in === 'function') {
@@ -167,7 +167,7 @@ export const getPatients = async (req, res) => {
     let query = supabase
       .from('profiles')
       .select('id, name, email, created_at, role, patients(roll_number, registration_number, phone, guardian_phone, blood_group), teachers(employee_id, phone, department, designation)')
-      .in('role', ['student', 'teacher', 'officer', 'patient']);
+      .in('role', ['patient', 'teacher', 'staff']);
 
     if (typeof query.order === 'function') {
       query = query.order('created_at', { ascending: false });
@@ -311,7 +311,7 @@ export const searchPatients = async (req, res) => {
           .from('profiles')
           .select('id, name, email, role')
           .or(`email.eq.${query},name.ilike.%${query}%`)
-          .in('role', ['student', 'teacher', 'officer', 'patient'])
+          .in('role', ['patient', 'teacher', 'staff'])
           .limit(1)
           .maybeSingle();
 

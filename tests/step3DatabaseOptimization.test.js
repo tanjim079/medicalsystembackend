@@ -911,4 +911,225 @@ describe('RUET MediSys — Phase 1, Step 3: Supabase Database Query Optimization
     // Must strictly exclude other patient's report ('lab-other-patient')
     assert.ok(!retrievedIds.includes('lab-other-patient'));
   });
+
+  test('24. GET /api/laboratory/reports strictly matches production schema columns without createdAt (reproducing & fixing 42703)', async () => {
+    let capturedSelect = null;
+    const mockReports = [
+      {
+        id: 'rep-001',
+        patient_id: studentAId,
+        test_name: 'Blood Sugar Fasting',
+        result: JSON.stringify({ patientId: '2204001', glucose: '5.4 mmol/L', status: 'Completed' }),
+        validated: true,
+        date: '2026-11-12'
+      }
+    ];
+
+    setTestDbHandler((table) => {
+      const builder = {
+        select: (cols) => {
+          capturedSelect = cols;
+          return builder;
+        },
+        eq: () => builder,
+        in: () => builder,
+        or: () => builder,
+        order: () => builder,
+        range: () => builder,
+        then: (resolve) => {
+          if (table === 'lab_reports') {
+            // Assert that createdAt is NOT in the select projection
+            if (capturedSelect && capturedSelect.includes('createdAt')) {
+              return resolve({ data: null, error: { code: '42703', message: 'column lab_reports.createdAt does not exist' } });
+            }
+            return resolve({ data: mockReports, error: null });
+          }
+          return resolve({ data: [], error: null });
+        }
+      };
+      return builder;
+    });
+
+    const res = await request(app, {
+      method: 'GET',
+      url: '/api/laboratory/reports',
+      headers: { authorization: `Bearer ${doctorAToken}` }
+    }, '127.0.0.76');
+
+    assert.equal(res.statusCode, 200);
+    assert.ok(Array.isArray(res.json));
+    assert.equal(res.json.length, 1);
+    assert.equal(res.json[0].testName, 'Blood Sugar Fasting');
+    assert.ok(!capturedSelect.includes('createdAt'), 'Projection must not contain non-existent column createdAt');
+  });
+
+  test('25. Patient search fallback by Name/Email uses valid user_role enum without throwing 22P02 (reproducing & fixing enum error)', async () => {
+    setTestPatientsData(null);
+    let capturedRoles = null;
+
+    setTestDbHandler((table) => {
+      const builder = {
+        select: () => builder,
+        eq: () => builder,
+        in: (field, values) => {
+          if (field === 'role') capturedRoles = values;
+          return builder;
+        },
+        or: () => builder,
+        order: () => builder,
+        limit: () => builder,
+        maybeSingle: async () => {
+          if (table === 'patients') return { data: null, error: null }; // Not found by roll/reg
+          if (table === 'teachers') return { data: null, error: null }; // Not found by emp
+          if (table === 'profiles') {
+            // If invalid enum 'student' or 'officer' is passed, simulate PostgreSQL 22P02
+            if (capturedRoles && (capturedRoles.includes('student') || capturedRoles.includes('officer'))) {
+              return { data: null, error: { code: '22P02', message: 'invalid input value for enum user_role: "student"' } };
+            }
+            return {
+              data: {
+                id: studentAId,
+                name: 'Tanjim Ahmed',
+                email: '2204002@student.ruet.ac.bd',
+                role: 'patient'
+              },
+              error: null
+            };
+          }
+          return { data: null, error: null };
+        },
+        then: (resolve) => resolve({ data: [], error: null })
+      };
+      return builder;
+    });
+
+    const res = await request(app, {
+      method: 'GET',
+      url: '/api/patients/search?query=Tanjim',
+      headers: { authorization: `Bearer ${doctorAToken}` }
+    }, '127.0.0.77');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json.name, 'Tanjim Ahmed');
+    assert.ok(capturedRoles, 'Role filter should be applied');
+    assert.ok(!capturedRoles.includes('student'), 'user_role enum must not contain invalid value "student"');
+    assert.ok(!capturedRoles.includes('officer'), 'user_role enum must not contain invalid value "officer"');
+    assert.ok(capturedRoles.includes('patient'), 'user_role enum must include "patient"');
+  });
+
+  test('26. Patient search with clinical relationship retrieves targeted lab reports without createdAt error', async () => {
+    setTestPatientsData(null);
+    let labSelectCols = null;
+
+    setTestDbHandler((table) => {
+      const builder = {
+        select: (cols) => {
+          if (table === 'lab_reports') labSelectCols = cols;
+          return builder;
+        },
+        eq: () => builder,
+        in: () => builder,
+        or: () => builder,
+        order: () => builder,
+        limit: () => builder,
+        maybeSingle: async () => {
+          if (table === 'patients') {
+            return {
+              data: {
+                id: studentAId,
+                roll_number: '2204001',
+                department: 'CSE',
+                phone: '01700000000',
+                blood_group: 'O(+ve)'
+              },
+              error: null
+            };
+          }
+          if (table === 'profiles') {
+            return {
+              data: {
+                id: studentAId,
+                name: 'Student A',
+                email: '2204001@student.ruet.ac.bd',
+                role: 'patient'
+              },
+              error: null
+            };
+          }
+          return { data: null, error: null };
+        },
+        then: (resolve) => {
+          if (table === 'prescriptions') {
+            return resolve({
+              data: [
+                { id: 'rx-1', date: '2026-11-12', diagnosis: 'Fever', doctorName: 'Dr. Consulting' }
+              ],
+              count: 1,
+              error: null
+            });
+          }
+          if (table === 'lab_reports') {
+            if (labSelectCols && labSelectCols.includes('createdAt')) {
+              return resolve({ data: null, error: { code: '42703', message: 'column lab_reports.createdAt does not exist' } });
+            }
+            return resolve({
+              data: [
+                {
+                  id: 'rep-rel-1',
+                  patient_id: studentAId,
+                  test_name: 'CBC',
+                  result: JSON.stringify({ patientId: '2204001', status: 'Completed' }),
+                  validated: true,
+                  date: '2026-11-12'
+                }
+              ],
+              count: 1,
+              error: null
+            });
+          }
+          return resolve({ data: [], error: null });
+        }
+      };
+      return builder;
+    });
+
+    const res = await request(app, {
+      method: 'GET',
+      url: '/api/patients/search?query=2204001',
+      headers: { authorization: `Bearer ${doctorAToken}` }
+    }, '127.0.0.78');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json.hasClinicalRelationship, true);
+    assert.equal(res.json.treatmentHistory.length, 1);
+    assert.equal(res.json.labReports.length, 1);
+    assert.ok(!labSelectCols.includes('createdAt'), 'fetchTargetedLabReports must not select non-existent column createdAt');
+  });
+
+  test('27. Non-existent patient search returns 404 without database exception', async () => {
+    setTestPatientsData(null);
+
+    setTestDbHandler(() => {
+      const builder = {
+        select: () => builder,
+        eq: () => builder,
+        in: () => builder,
+        or: () => builder,
+        order: () => builder,
+        limit: () => builder,
+        maybeSingle: async () => ({ data: null, error: null }),
+        then: (resolve) => resolve({ data: [], error: null })
+      };
+      return builder;
+    });
+
+    const res = await request(app, {
+      method: 'GET',
+      url: '/api/patients/search?query=nonexistent-999999',
+      headers: { authorization: `Bearer ${doctorAToken}` }
+    }, '127.0.0.79');
+
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.json.error, 'Patient not found');
+  });
 });

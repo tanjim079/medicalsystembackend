@@ -119,7 +119,7 @@ export const getLabReports = async (req, res) => {
 
     let query = supabase
       .from('lab_reports')
-      .select('id, patient_id, test_name, result, validated, date, createdAt');
+      .select('id, patient_id, test_name, result, validated, date');
 
     // Filter at DB level if patientId is provided
     if (patientId) {
@@ -167,7 +167,7 @@ export const createLabReport = async (req, res) => {
     const { data, error } = await supabase
       .from('lab_reports')
       .insert([dbPayload])
-      .select('id, patient_id, test_name, result, validated, date, createdAt');
+      .select('id, patient_id, test_name, result, validated, date');
 
     if (error) throw error;
 
@@ -216,7 +216,7 @@ export const updateLabReport = async (req, res) => {
       .from('lab_reports')
       .update(dbPayload)
       .eq('id', id)
-      .select('id, patient_id, test_name, result, validated, date, createdAt');
+      .select('id, patient_id, test_name, result, validated, date');
 
     if (error) throw error;
     res.status(200).json(unpackLabReport(data[0]));
