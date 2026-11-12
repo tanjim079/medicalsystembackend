@@ -15,7 +15,7 @@ export const getMedicines = async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('medicines')
-      .select('*')
+      .select('id, name, stock')
       .order('name', { ascending: true });
 
     if (error) throw error;
@@ -44,7 +44,7 @@ export const updateMedicineStock = async (req, res) => {
       .from('medicines')
       .update({ stock })
       .eq('id', id)
-      .select()
+      .select('id, name, stock')
       .single();
 
     if (error) throw error;
@@ -71,7 +71,7 @@ export const addMedicine = async (req, res) => {
     const { data, error } = await supabase
       .from('medicines')
       .insert([{ name, stock: stock || 0 }])
-      .select()
+      .select('id, name, stock')
       .single();
 
     if (error) throw error;

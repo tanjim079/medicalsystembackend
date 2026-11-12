@@ -20,6 +20,7 @@ export const setTestIdentifiers = (map) => {
 /**
  * Resolves all canonical identifiers (UUID, roll number, registration number, employee ID)
  * belonging to a given authenticated user.
+ * Concurrently checks patients and teachers tables for minimal latency.
  */
 export async function getUserPatientIdentifiers(user) {
   if (!user || !user.id) {
@@ -49,25 +50,27 @@ export async function getUserPatientIdentifiers(user) {
   }
 
   try {
-    // 1. Check patients table for student / general patient
-    const { data: patientRecord } = await supabase
-      .from('patients')
-      .select('roll_number, registration_number')
-      .eq('id', userId)
-      .maybeSingle();
+    // Concurrently check patients (student) and teachers (faculty) tables
+    const [patientRes, teacherRes] = await Promise.all([
+      supabase
+        .from('patients')
+        .select('roll_number, registration_number')
+        .eq('id', userId)
+        .maybeSingle(),
+      supabase
+        .from('teachers')
+        .select('employee_id')
+        .eq('id', userId)
+        .maybeSingle()
+    ]);
 
+    const patientRecord = patientRes?.data;
     if (patientRecord) {
       if (patientRecord.roll_number) canonicalIds.push(String(patientRecord.roll_number).trim());
       if (patientRecord.registration_number) canonicalIds.push(String(patientRecord.registration_number).trim());
     }
 
-    // 2. Check teachers table for faculty member
-    const { data: teacherRecord } = await supabase
-      .from('teachers')
-      .select('employee_id')
-      .eq('id', userId)
-      .maybeSingle();
-
+    const teacherRecord = teacherRes?.data;
     if (teacherRecord && teacherRecord.employee_id) {
       canonicalIds.push(String(teacherRecord.employee_id).trim());
     }
@@ -87,13 +90,15 @@ export async function getUserPatientIdentifiers(user) {
 /**
  * Resolves a target patient identifier (which may be a UUID or a roll/employee ID)
  * to its complete set of matching canonical IDs.
+ * Accepts optional preloaded identifiers to avoid duplicate database lookups.
  */
-export async function resolveTargetPatientIdentifiers(targetId) {
+export async function resolveTargetPatientIdentifiers(targetId, preloadedData = null) {
   if (!targetId) return { canonicalIds: [], normalizedSet: new Set() };
 
   const idStr = String(targetId).trim();
   const canonicalIds = [idStr];
 
+  // Fast-path test identifiers map (non-production only)
   if (process.env.NODE_ENV !== 'production' && testIdentifiersMap) {
     if (testIdentifiersMap[idStr]) {
       return {
@@ -107,31 +112,56 @@ export async function resolveTargetPatientIdentifiers(targetId) {
     };
   }
 
+  // Fast-path if caller already resolved the patient or teacher record
+  if (preloadedData) {
+    if (preloadedData.id) canonicalIds.push(String(preloadedData.id).trim());
+    if (preloadedData.roll_number) canonicalIds.push(String(preloadedData.roll_number).trim());
+    if (preloadedData.registration_number) canonicalIds.push(String(preloadedData.registration_number).trim());
+    if (preloadedData.employee_id) canonicalIds.push(String(preloadedData.employee_id).trim());
+    const uniqueIds = [...new Set(canonicalIds)];
+    return {
+      canonicalIds: uniqueIds,
+      normalizedSet: new Set(uniqueIds.map((id) => id.toLowerCase()))
+    };
+  }
+
   try {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idStr);
 
     if (isUUID) {
-      const { data: p } = await supabase.from('patients').select('roll_number, registration_number').eq('id', idStr).maybeSingle();
+      // Concurrently query patients and teachers tables for associated identifiers
+      const [pRes, tRes] = await Promise.all([
+        supabase.from('patients').select('roll_number, registration_number').eq('id', idStr).maybeSingle(),
+        supabase.from('teachers').select('employee_id').eq('id', idStr).maybeSingle()
+      ]);
+
+      const p = pRes?.data;
       if (p?.roll_number) canonicalIds.push(String(p.roll_number).trim());
       if (p?.registration_number) canonicalIds.push(String(p.registration_number).trim());
 
-      const { data: t } = await supabase.from('teachers').select('employee_id').eq('id', idStr).maybeSingle();
+      const t = tRes?.data;
       if (t?.employee_id) canonicalIds.push(String(t.employee_id).trim());
     } else {
-      // It's a roll number or employee ID, find UUID
-      const { data: p } = await supabase.from('patients').select('id, roll_number, registration_number').eq('roll_number', idStr).maybeSingle();
+      // Identifier is roll number or employee ID; resolve UUID concurrently
+      const [pRes, tRes] = await Promise.all([
+        supabase.from('patients').select('id, roll_number, registration_number').eq('roll_number', idStr).maybeSingle(),
+        supabase.from('teachers').select('id, employee_id').eq('employee_id', idStr).maybeSingle()
+      ]);
+
+      const p = pRes?.data;
       if (p?.id) canonicalIds.push(String(p.id).trim());
       if (p?.registration_number) canonicalIds.push(String(p.registration_number).trim());
 
-      const { data: t } = await supabase.from('teachers').select('id, employee_id').eq('employee_id', idStr).maybeSingle();
+      const t = tRes?.data;
       if (t?.id) canonicalIds.push(String(t.id).trim());
     }
   } catch (err) {
     // Continue with whatever identifiers were resolved
   }
 
-  const normalizedSet = new Set(canonicalIds.map((id) => id.toLowerCase()));
-  return { canonicalIds, normalizedSet };
+  const uniqueIds = [...new Set(canonicalIds)];
+  const normalizedSet = new Set(uniqueIds.map((id) => id.toLowerCase()));
+  return { canonicalIds: uniqueIds, normalizedSet };
 }
 
 /**
@@ -143,7 +173,7 @@ export async function resolveTargetPatientIdentifiers(targetId) {
  * - Doctor: Allowed ONLY if an active or past clinical relationship exists (appointment, prescription, certificate).
  * - Other staff: Denied full clinical record access.
  */
-export async function verifyPatientRecordAccess(user, targetPatientId) {
+export async function verifyPatientRecordAccess(user, targetPatientId, options = {}) {
   if (!user || !user.id) {
     return { allowed: false, reason: 'Unauthorized: User authentication required' };
   }
@@ -155,8 +185,9 @@ export async function verifyPatientRecordAccess(user, targetPatientId) {
     return { allowed: true, reason: 'Administrator clinical access' };
   }
 
-  // 2. Resolve target patient identifiers
-  const target = await resolveTargetPatientIdentifiers(targetPatientId);
+  // 2. Resolve target patient identifiers (reuses preloaded data if provided)
+  const target = options.targetIdentifiers ||
+    await resolveTargetPatientIdentifiers(targetPatientId, options.preloadedData);
   const targetIdLower = String(targetPatientId).trim().toLowerCase();
 
   // 3. Patient / Student / Teacher Ownership Verification
@@ -194,42 +225,40 @@ export async function verifyPatientRecordAccess(user, targetPatientId) {
     }
 
     try {
-      // Check for assigned appointment
-      const { data: appt } = await supabase
-        .from('appointments')
-        .select('id')
-        .eq('doctorId', doctorId)
-        .in('patientId', checkIds)
-        .limit(1)
-        .maybeSingle();
+      // Concurrently check appointments, prescriptions, and certificates
+      const [apptRes, prescRes, certRes] = await Promise.all([
+        supabase
+          .from('appointments')
+          .select('id')
+          .eq('doctorId', doctorId)
+          .in('patientId', checkIds)
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from('prescriptions')
+          .select('id')
+          .eq('doctorId', doctorId)
+          .in('patientId', checkIds)
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from('certificates')
+          .select('id')
+          .eq('doctorId', doctorId)
+          .in('patientId', checkIds)
+          .limit(1)
+          .maybeSingle()
+      ]);
 
-      if (appt) {
+      if (apptRes?.data) {
         return { allowed: true, reason: 'Doctor has active consultation appointment with patient' };
       }
 
-      // Check for authored prescription
-      const { data: presc } = await supabase
-        .from('prescriptions')
-        .select('id')
-        .eq('doctorId', doctorId)
-        .in('patientId', checkIds)
-        .limit(1)
-        .maybeSingle();
-
-      if (presc) {
+      if (prescRes?.data) {
         return { allowed: true, reason: 'Doctor has authored prescriptions for patient' };
       }
 
-      // Check for issued certificate
-      const { data: cert } = await supabase
-        .from('certificates')
-        .select('id')
-        .eq('doctorId', doctorId)
-        .in('patientId', checkIds)
-        .limit(1)
-        .maybeSingle();
-
-      if (cert) {
+      if (certRes?.data) {
         return { allowed: true, reason: 'Doctor has issued medical certificates for patient' };
       }
     } catch (err) {

@@ -7,8 +7,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node --test test/health.test.js test/auth.test.js tests/securityHardeningIncrement1-5.test.js",
-    "bench": "node scripts/benchmark-auth.js"
+    "test": "node --test test/health.test.js test/auth.test.js tests/securityHardeningIncrement1-5.test.js tests/step3DatabaseOptimization.test.js",
+    "bench": "node scripts/benchmark-auth.js",
+    "bench:db": "node scripts/benchmark-db.js"
   },
   "keywords": [],
   "author": "",

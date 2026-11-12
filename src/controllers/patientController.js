@@ -1,5 +1,5 @@
 import supabase from '../config/supabase.js';
-import { verifyPatientRecordAccess } from '../services/recordAuthorization.js';
+import { verifyPatientRecordAccess, resolveTargetPatientIdentifiers } from '../services/recordAuthorization.js';
 
 let testPatientsData = null;
 
@@ -10,6 +10,149 @@ export const setTestPatientsData = (data) => {
   testPatientsData = data;
 };
 
+/**
+ * Helper to unpack and filter laboratory reports securely to target patient.
+ * Performs strict exact equality verification to prevent accidental cross-patient matches.
+ */
+function unpackLabReports(rawReports, patientId, specificData, fallbackPatientName) {
+  if (!rawReports || !Array.isArray(rawReports)) return [];
+  const targetIds = new Set();
+  if (patientId) targetIds.add(String(patientId).trim().toLowerCase());
+  if (specificData?.roll_number) targetIds.add(String(specificData.roll_number).trim().toLowerCase());
+  if (specificData?.employee_id) targetIds.add(String(specificData.employee_id).trim().toLowerCase());
+  if (specificData?.registration_number) targetIds.add(String(specificData.registration_number).trim().toLowerCase());
+
+  const unpacked = rawReports.map((record) => {
+    let json = {};
+    if (record.result) {
+      try {
+        json = typeof record.result === 'string' ? JSON.parse(record.result) : record.result;
+      } catch (e) {}
+    }
+    const isFinal = record.validated || json.status === 'Completed' || json.status === 'Validated';
+    const resolvedPatId = record.patient_id || json.patientId || json.patient_id || record.patientId || '';
+    return {
+      ...json,
+      id: record.id || json.id || '',
+      patientId: resolvedPatId,
+      patientName: json.patientName || fallbackPatientName || 'Unknown Patient',
+      testName: record.test_name || json.testName || record.testName || 'Unknown Test',
+      status: isFinal ? 'Completed' : (json.status || 'Pending'),
+      date: record.date || json.date || new Date().toISOString().split('T')[0],
+      requestedAt: json.requestedAt || new Date().toISOString(),
+      completedAt: json.completedAt || json.validatedAt || record.date || new Date().toISOString(),
+      validatedAt: json.validatedAt || json.completedAt || record.date || new Date().toISOString()
+    };
+  }).filter((r) => {
+    // Strict exact equality matching: never allows substring false positives
+    const rPat = String(r.patientId || '').trim().toLowerCase();
+    return targetIds.has(rPat);
+  });
+
+  unpacked.totalCount = rawReports.totalCount !== undefined ? rawReports.totalCount : unpacked.length;
+  return unpacked;
+}
+
+/**
+ * Targeted database query for laboratory reports without full-table scans.
+ * Supports complete history retrieval and safe pagination without silently dropping older records.
+ * Fails closed on database errors to prevent partial histories from masquerading as complete histories.
+ */
+async function fetchTargetedLabReports(matchPatientIds, rollNumber, employeeId, options = {}) {
+  const filterClauses = [];
+  if (matchPatientIds && matchPatientIds.length > 0) {
+    filterClauses.push(`patient_id.in.(${matchPatientIds.join(',')})`);
+    // Also cover unlinked legacy reports where patient UUID was recorded inside JSON
+    for (const pid of matchPatientIds) {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pid)) {
+        filterClauses.push(`result.ilike.%"patientId":"${pid}"%`);
+        filterClauses.push(`result.ilike.%"patientId": "${pid}"%`);
+        filterClauses.push(`result.ilike.%"patient_id":"${pid}"%`);
+        filterClauses.push(`result.ilike.%"patient_id": "${pid}"%`);
+      }
+    }
+  }
+  // Exact JSON token matching ensuring no substring false-positives (e.g. roll '725' vs '1725')
+  if (rollNumber) {
+    filterClauses.push(`result.ilike.%"patientId":"${rollNumber}"%`);
+    filterClauses.push(`result.ilike.%"patientId": "${rollNumber}"%`);
+    filterClauses.push(`result.ilike.%"patient_id":"${rollNumber}"%`);
+    filterClauses.push(`result.ilike.%"patient_id": "${rollNumber}"%`);
+  }
+  if (employeeId) {
+    filterClauses.push(`result.ilike.%"patientId":"${employeeId}"%`);
+    filterClauses.push(`result.ilike.%"patientId": "${employeeId}"%`);
+    filterClauses.push(`result.ilike.%"patient_id":"${employeeId}"%`);
+    filterClauses.push(`result.ilike.%"patient_id": "${employeeId}"%`);
+  }
+
+  let query = supabase
+    .from('lab_reports')
+    .select('id, patient_id, test_name, result, validated, date, createdAt', { count: 'exact' });
+
+  if (filterClauses.length > 0 && typeof query.or === 'function') {
+    query = query.or(filterClauses.join(','));
+  } else if (matchPatientIds && matchPatientIds.length > 0 && typeof query.in === 'function') {
+    query = query.in('patient_id', matchPatientIds);
+  }
+
+  // Stable deterministic chronological ordering with unique primary-key tie-breaker
+  if (typeof query.order === 'function') {
+    query = query.order('date', { ascending: false });
+    if (typeof query.order === 'function') {
+      query = query.order('id', { ascending: false });
+    }
+  }
+
+  // Safe pagination: applied only when explicitly requested; otherwise complete history is fetched
+  if (options.limit && typeof query.range === 'function') {
+    const offset = options.offset || 0;
+    query = query.range(offset, offset + options.limit - 1);
+  } else if (options.limit && typeof query.limit === 'function') {
+    query = query.limit(options.limit);
+  }
+
+  const { data, count, error } = await query;
+  if (error) {
+    // Fail closed: do not return an empty array that hides medical records
+    throw new Error(`Database error retrieving laboratory reports: ${error.message}`);
+  }
+
+  let allData = Array.isArray(data) ? [...data] : [];
+  const totalCount = count !== undefined && count !== null ? count : allData.length;
+
+  // Reliable complete-history retrieval: if unpaginated and server PostgREST capped at max-rows (data.length < count)
+  if (!options.limit && totalCount > allData.length && typeof supabase.from === 'function') {
+    let currentOffset = allData.length;
+    const CHUNK_SIZE = 1000;
+    while (allData.length < totalCount && currentOffset < 10000) {
+      let chunkQuery = supabase
+        .from('lab_reports')
+        .select('id, patient_id, test_name, result, validated, date, createdAt');
+      if (filterClauses.length > 0 && typeof chunkQuery.or === 'function') {
+        chunkQuery = chunkQuery.or(filterClauses.join(','));
+      } else if (matchPatientIds && matchPatientIds.length > 0 && typeof chunkQuery.in === 'function') {
+        chunkQuery = chunkQuery.in('patient_id', matchPatientIds);
+      }
+      if (typeof chunkQuery.order === 'function') {
+        chunkQuery = chunkQuery.order('date', { ascending: false }).order('id', { ascending: false });
+      }
+      if (typeof chunkQuery.range === 'function') {
+        chunkQuery = chunkQuery.range(currentOffset, currentOffset + CHUNK_SIZE - 1);
+      } else {
+        break;
+      }
+      const chunkRes = await chunkQuery;
+      if (chunkRes.error || !chunkRes.data || chunkRes.data.length === 0) break;
+      allData.push(...chunkRes.data);
+      currentOffset += chunkRes.data.length;
+    }
+  }
+
+  allData.totalCount = totalCount;
+  return allData;
+}
+
 // @desc    Get all patients
 // @route   GET /api/patients
 export const getPatients = async (req, res) => {
@@ -18,14 +161,28 @@ export const getPatients = async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase
+    const limit = req.query.limit ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 200) : 100;
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    let query = supabase
       .from('profiles')
       .select('id, name, email, created_at, role, patients(roll_number, registration_number, phone, guardian_phone, blood_group), teachers(employee_id, phone, department, designation)')
       .in('role', ['student', 'teacher', 'officer', 'patient']);
 
+    if (typeof query.order === 'function') {
+      query = query.order('created_at', { ascending: false });
+      if (typeof query.order === 'function') {
+        query = query.order('id', { ascending: false });
+      }
+    }
+    if (typeof query.range === 'function') {
+      query = query.range(offset, offset + limit - 1);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.status(200).json(data || []);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -118,46 +275,49 @@ export const searchPatients = async (req, res) => {
 
     if (isUUID) {
       patientId = query;
-      const { data: prof } = await supabase.from('profiles').select('*').eq('id', patientId).maybeSingle();
-      matchedProfile = prof;
+      const [profRes, pRes, tRes] = await Promise.all([
+        supabase.from('profiles').select('id, name, email, role').eq('id', patientId).maybeSingle(),
+        supabase.from('patients').select('id, roll_number, registration_number, department, phone, date_of_birth, blood_group, guardian_name, guardian_phone, age').eq('id', patientId).maybeSingle(),
+        supabase.from('teachers').select('id, employee_id, name, department, designation, phone, email').eq('id', patientId).maybeSingle()
+      ]);
+      matchedProfile = profRes?.data;
+      specificData = pRes?.data || tRes?.data;
     } else {
-      // 1. Search patients table by roll_number or registration_number
-      const { data: pRec } = await supabase
-        .from('patients')
-        .select('*')
-        .or(`roll_number.eq.${query},registration_number.eq.${query}`)
-        .limit(1)
-        .maybeSingle();
-
-      if (pRec) {
-        patientId = pRec.id;
-        specificData = pRec;
-      } else {
-        // 2. Search teachers table by employee_id
-        const { data: tRec } = await supabase
+      // Concurrently query patients table by roll/reg and teachers table by employee_id
+      const [patientLookup, teacherLookup] = await Promise.all([
+        supabase
+          .from('patients')
+          .select('id, roll_number, registration_number, department, phone, date_of_birth, blood_group, guardian_name, guardian_phone, age')
+          .or(`roll_number.eq.${query},registration_number.eq.${query}`)
+          .limit(1)
+          .maybeSingle(),
+        supabase
           .from('teachers')
-          .select('*')
+          .select('id, employee_id, name, department, designation, phone, email')
           .eq('employee_id', query)
+          .limit(1)
+          .maybeSingle()
+      ]);
+
+      if (patientLookup?.data) {
+        patientId = patientLookup.data.id;
+        specificData = patientLookup.data;
+      } else if (teacherLookup?.data) {
+        patientId = teacherLookup.data.id;
+        specificData = teacherLookup.data;
+      } else {
+        // Fallback: search profiles table by email or name (ilike)
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('id, name, email, role')
+          .or(`email.eq.${query},name.ilike.%${query}%`)
+          .in('role', ['student', 'teacher', 'officer', 'patient'])
           .limit(1)
           .maybeSingle();
 
-        if (tRec) {
-          patientId = tRec.id;
-          specificData = tRec;
-        } else {
-          // 3. Search profiles table by email or name (ilike)
-          const { data: prof } = await supabase
-            .from('profiles')
-            .select('*')
-            .or(`email.eq.${query},name.ilike.%${query}%`)
-            .in('role', ['student', 'teacher', 'officer', 'patient'])
-            .limit(1)
-            .maybeSingle();
-
-          if (prof) {
-            patientId = prof.id;
-            matchedProfile = prof;
-          }
+        if (prof) {
+          patientId = prof.id;
+          matchedProfile = prof;
         }
       }
     }
@@ -166,20 +326,28 @@ export const searchPatients = async (req, res) => {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
-    // Fetch profile if not already fetched
+    // Concurrently fetch profile and specific data if either is missing
+    const missingFetches = [];
     if (!matchedProfile) {
-      const { data: prof } = await supabase.from('profiles').select('*').eq('id', patientId).maybeSingle();
-      matchedProfile = prof;
+      missingFetches.push(
+        supabase.from('profiles').select('id, name, email, role').eq('id', patientId).maybeSingle().then(r => { matchedProfile = r?.data; })
+      );
+    }
+    if (!specificData) {
+      missingFetches.push(
+        supabase.from('patients').select('id, roll_number, registration_number, department, phone, date_of_birth, blood_group, guardian_name, guardian_phone, age').eq('id', patientId).maybeSingle().then(async (r) => {
+          if (r?.data) {
+            specificData = r.data;
+          } else {
+            const { data: tData } = await supabase.from('teachers').select('id, employee_id, name, department, designation, phone, email').eq('id', patientId).maybeSingle();
+            if (tData) specificData = tData;
+          }
+        })
+      );
     }
 
-    // Fetch specific data if not already fetched
-    if (!specificData) {
-      const { data: pData } = await supabase.from('patients').select('*').eq('id', patientId).maybeSingle();
-      specificData = pData;
-      if (!specificData) {
-        const { data: tData } = await supabase.from('teachers').select('*').eq('id', patientId).maybeSingle();
-        specificData = tData;
-      }
+    if (missingFetches.length > 0) {
+      await Promise.all(missingFetches);
     }
 
     if (!matchedProfile && !specificData) {
@@ -202,56 +370,57 @@ export const searchPatients = async (req, res) => {
     if (callerRole === 'admin') {
       hasClinicalRelationship = true;
     } else if (callerRole === 'doctor' && req.user) {
-      const accessAuth = await verifyPatientRecordAccess(req.user, patientId);
+      const accessAuth = await verifyPatientRecordAccess(req.user, patientId, { preloadedData: specificData });
       hasClinicalRelationship = accessAuth.allowed;
     }
 
     let treatments = [];
     let labReports = [];
+    let payloadClinicalMeta = null;
+    let clinicalTotalVisits = 0;
 
-    // Only fetch clinical records if relationship exists
+    // Only fetch clinical records if relationship exists (preserves walk-in consultation boundary)
     if (hasClinicalRelationship) {
       const matchPatientIds = [patientId];
       if (specificData?.roll_number) matchPatientIds.push(String(specificData.roll_number));
       if (specificData?.employee_id) matchPatientIds.push(String(specificData.employee_id));
 
-      const { data: trData } = await supabase
+      // Fetch complete authorized treatments and targeted lab reports concurrently with deterministic ordering
+      let prescQuery = supabase
         .from('prescriptions')
-        .select('id, date, diagnosis, doctorName')
+        .select('id, date, diagnosis, doctorName', { count: 'exact' })
         .in('patientId', matchPatientIds)
         .order('date', { ascending: false });
-      treatments = trData || [];
-
-      // Fetch lab reports
-      const { data: rawLabReports } = await supabase
-        .from('lab_reports')
-        .select('*')
-        .order('date', { ascending: false });
-
-      if (rawLabReports) {
-        const pIdLower = String(patientId).toLowerCase();
-        const rollLower = specificData?.roll_number ? String(specificData.roll_number).toLowerCase() : '';
-        const empLower = specificData?.employee_id ? String(specificData.employee_id).toLowerCase() : '';
-
-        labReports = rawLabReports.map(record => {
-          let json = {};
-          if (record.result) {
-            try { json = JSON.parse(record.result); } catch (e) {}
-          }
-          const isFinal = record.validated || json.status === 'Completed' || json.status === 'Validated';
-          return {
-            ...json,
-            id: record.id || json.id || '',
-            patientId: record.patient_id || json.patientId || '',
-            testName: record.test_name || json.testName || 'Unknown Test',
-            status: isFinal ? 'Completed' : (json.status || 'Pending'),
-            date: record.date || json.date || new Date().toISOString().split('T')[0]
-          };
-        }).filter(r => {
-          const rPat = String(r.patientId || '').toLowerCase();
-          return rPat === pIdLower || (rollLower && rPat === rollLower) || (empLower && rPat === empLower);
-        });
+      if (typeof prescQuery.order === 'function') {
+        prescQuery = prescQuery.order('id', { ascending: false });
       }
+
+      const [treatmentsRes, rawLabData] = await Promise.all([
+        prescQuery,
+        fetchTargetedLabReports(matchPatientIds, specificData?.roll_number, specificData?.employee_id)
+      ]);
+
+      if (treatmentsRes?.error) {
+        throw new Error(`Database error fetching treatments: ${treatmentsRes.error.message}`);
+      }
+
+      treatments = treatmentsRes?.data || [];
+      const totalPrescriptionCount = treatmentsRes?.count !== undefined && treatmentsRes?.count !== null
+        ? treatmentsRes.count
+        : treatments.length;
+
+      labReports = unpackLabReports(rawLabData, patientId, specificData, matchedProfile?.name || specificData?.name);
+      const totalLabCount = labReports.totalCount !== undefined ? labReports.totalCount : labReports.length;
+      const isComplete = (treatments.length >= totalPrescriptionCount) && (labReports.length >= totalLabCount);
+
+      payloadClinicalMeta = {
+        isComplete,
+        totalPrescriptions: totalPrescriptionCount,
+        retrievedPrescriptions: treatments.length,
+        totalLabReports: totalLabCount,
+        retrievedLabReports: labReports.length
+      };
+      clinicalTotalVisits = totalPrescriptionCount;
     }
 
     const payload = {
@@ -272,9 +441,10 @@ export const searchPatients = async (req, res) => {
       treatmentHistory: treatments,
       labReports,
       visitSummary: {
-        totalVisits: treatments.length,
+        totalVisits: clinicalTotalVisits,
         lastVisit: treatments[0]?.date || null
-      }
+      },
+      ...(payloadClinicalMeta ? { clinicalHistoryMeta: payloadClinicalMeta } : {})
     };
 
     return res.status(200).json(payload);
@@ -320,52 +490,41 @@ export const getPatientById = async (req, res) => {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
-    // Verify patient record authorization before DB queries to prevent enumeration
-    if (req.user) {
-      const accessAuth = await verifyPatientRecordAccess(req.user, patientId);
-      if (!accessAuth.allowed) {
-        return res.status(403).json({
-          error: accessAuth.reason || 'Forbidden: Access to this patient record is denied'
-        });
-      }
-    }
-
-    // Check if ID is UUID, otherwise treat as roll_number
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(patientId);
 
-    console.log('--- ROUTE HIT ---');
-    console.log('Raw ID:', id, 'Length:', id?.length);
-    console.log('Is UUID:', isUUID);
+    let specificData = null;
 
-          if (!isUUID) {
-        console.log('Searching by roll_number or employee_id:', patientId);
-        let { data: patientRecord, error: pError } = await supabase
+    // Resolve non-UUID roll numbers or employee IDs concurrently
+    if (!isUUID) {
+      const [patientLookup, teacherLookup] = await Promise.all([
+        supabase
           .from('patients')
-          .select('id')
-          .eq('roll_number', patientId).limit(1).maybeSingle();
+          .select('id, roll_number, registration_number, department, phone, date_of_birth, blood_group, guardian_name, guardian_phone, age')
+          .eq('roll_number', patientId)
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from('teachers')
+          .select('id, employee_id, name, department, designation, phone, email')
+          .eq('employee_id', patientId)
+          .limit(1)
+          .maybeSingle()
+      ]);
 
-        if (!patientRecord) {
-           const { data: teacherRecord } = await supabase
-             .from('teachers')
-             .select('id')
-             .eq('employee_id', patientId).limit(1).maybeSingle();
-           if (teacherRecord) {
-             patientRecord = teacherRecord;
-             pError = null;
-           }
-        }
-
-        if (pError || !patientRecord) {
-          return res.status(404).json({ error: 'Patient not found' });
-        }
-        patientId = patientRecord.id;
+      if (patientLookup?.data) {
+        patientId = patientLookup.data.id;
+        specificData = patientLookup.data;
+      } else if (teacherLookup?.data) {
+        patientId = teacherLookup.data.id;
+        specificData = teacherLookup.data;
+      } else {
+        return res.status(404).json({ error: 'Patient not found' });
       }
+    }
 
-    console.log('Found patient UUID:', patientId);
-
-    // Verify patient record authorization (enforce patient ownership or doctor clinical relationship)
+    // Verify patient record authorization ONCE using resolved canonical identity
     if (req.user) {
-      const accessAuth = await verifyPatientRecordAccess(req.user, patientId);
+      const accessAuth = await verifyPatientRecordAccess(req.user, patientId, { preloadedData: specificData });
       if (!accessAuth.allowed) {
         return res.status(403).json({
           error: accessAuth.reason || 'Forbidden: Access to this patient record is denied'
@@ -373,40 +532,59 @@ export const getPatientById = async (req, res) => {
       }
     }
 
-    if (testPatientsData && testPatientsData[patientId]) {
-      return res.status(200).json(testPatientsData[patientId]);
+    // Support safe pagination if requested, but default to complete authorized clinical history
+    const historyLimit = req.query.limit ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 500) : null;
+    const historyOffset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const matchPatientIds = [patientId];
+    if (specificData?.roll_number) matchPatientIds.push(String(specificData.roll_number));
+    if (specificData?.employee_id) matchPatientIds.push(String(specificData.employee_id));
+
+    let prescQuery = supabase
+      .from('prescriptions')
+      .select('id, date, diagnosis, doctorName', { count: 'exact' })
+      .in('patientId', matchPatientIds)
+      .order('date', { ascending: false });
+
+    if (typeof prescQuery.order === 'function') {
+      prescQuery = prescQuery.order('id', { ascending: false });
     }
 
-    // 1. Fetch Profile Data
-    const { data: profile, error: profileError } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', patientId)
-      .maybeSingle();
-
-    if (profileError) throw profileError;
-    if (!profile) {
-      console.warn('Patient profile not found in profiles table, checking fallbacks');
+    if (historyLimit && typeof prescQuery.range === 'function') {
+      prescQuery = prescQuery.range(historyOffset, historyOffset + historyLimit - 1);
+    } else if (historyLimit && typeof prescQuery.limit === 'function') {
+      prescQuery = prescQuery.limit(historyLimit);
     }
 
-    // 2. Fetch Patient Specific Data
-    const { data: patientData, error: patientError } = await supabase
-      .from('patients')
-      .select('*')
-      .eq('id', patientId)
-      .maybeSingle();
+    const labOptions = historyLimit ? { limit: historyLimit, offset: historyOffset } : {};
 
-    let specificData = patientData;
+    // Execute independent data queries CONCURRENTLY with Promise.all
+    const queries = [
+      supabase.from('profiles').select('id, name, email, role, created_at').eq('id', patientId).maybeSingle(),
+      specificData
+        ? Promise.resolve({ data: specificData, error: null })
+        : supabase.from('patients').select('id, roll_number, registration_number, department, phone, date_of_birth, blood_group, guardian_name, guardian_phone, age').eq('id', patientId).maybeSingle().then(async (r) => {
+            if (r?.data) return r;
+            return supabase.from('teachers').select('id, employee_id, name, department, designation, phone, email').eq('id', patientId).maybeSingle();
+          }),
+      prescQuery,
+      fetchTargetedLabReports(matchPatientIds, specificData?.roll_number, specificData?.employee_id, labOptions)
+    ];
 
-    // Check teachers table if not found in patients table
-    if (!specificData) {
-      const { data: teacherData } = await supabase
-        .from('teachers')
-        .select('*')
-        .eq('id', patientId)
-        .maybeSingle();
-      if (teacherData) {
-        specificData = teacherData;
+    const [profileRes, specificRes, treatmentsRes, rawLabData] = await Promise.all(queries);
+
+    if (treatmentsRes?.error) {
+      throw new Error(`Database error retrieving treatments: ${treatmentsRes.error.message}`);
+    }
+
+    const profile = profileRes?.data;
+    if (specificRes?.data) {
+      specificData = specificRes.data;
+      if (specificData.roll_number && !matchPatientIds.includes(String(specificData.roll_number))) {
+        matchPatientIds.push(String(specificData.roll_number));
+      }
+      if (specificData.employee_id && !matchPatientIds.includes(String(specificData.employee_id))) {
+        matchPatientIds.push(String(specificData.employee_id));
       }
     }
 
@@ -414,99 +592,73 @@ export const getPatientById = async (req, res) => {
       return res.status(404).json({ error: 'Patient profile not found in database' });
     }
 
-    let patientName = profile?.name || specificData?.name || null;
-    let patientEmail = profile?.email || null;
+    const patientName = profile?.name || specificData?.name || 'Unknown';
+    const patientEmail = profile?.email || null;
+    let treatments = Array.isArray(treatmentsRes?.data) ? [...treatmentsRes.data] : [];
+    const totalPrescriptionCount = treatmentsRes?.count !== undefined && treatmentsRes?.count !== null
+      ? treatmentsRes.count
+      : treatments.length;
 
-    if (!patientName) {
-      try {
-        const { data: authUser } = await supabase.auth.admin.getUserById(patientId);
-        if (authUser?.user) {
-          patientName = authUser.user.user_metadata?.name || null;
-          patientEmail = patientEmail || authUser.user.email;
+    // Reliable complete-history retrieval: if unpaginated and server PostgREST capped at max-rows
+    if (!historyLimit && totalPrescriptionCount > treatments.length && typeof supabase.from === 'function') {
+      let currentOffset = treatments.length;
+      const CHUNK_SIZE = 1000;
+      while (treatments.length < totalPrescriptionCount && currentOffset < 10000) {
+        let chunkQuery = supabase
+          .from('prescriptions')
+          .select('id, date, diagnosis, doctorName')
+          .in('patientId', matchPatientIds);
+        if (typeof chunkQuery.order === 'function') {
+          chunkQuery = chunkQuery.order('date', { ascending: false }).order('id', { ascending: false });
         }
-      } catch (authErr) {
-        console.warn('Auth user lookup fallback error:', authErr.message);
+        if (typeof chunkQuery.range === 'function') {
+          chunkQuery = chunkQuery.range(currentOffset, currentOffset + CHUNK_SIZE - 1);
+        } else {
+          break;
+        }
+        const chunkRes = await chunkQuery;
+        if (chunkRes.error || !chunkRes.data || chunkRes.data.length === 0) break;
+        treatments.push(...chunkRes.data);
+        currentOffset += chunkRes.data.length;
       }
     }
-    const secretKeyExists = !!process.env.SUPABASE_SECRET_KEY;
-    console.log('Query ID:', patientId);
-    console.log('Secret Key exists?', secretKeyExists);
-    console.log('Patient Data Result:', patientData);
-    console.log('-------------------------');
 
-    // 3. Fetch Treatment History (from prescriptions table)
-    const matchPatientIds = [patientId];
-    if (specificData?.roll_number) matchPatientIds.push(String(specificData.roll_number));
-    if (specificData?.employee_id) matchPatientIds.push(String(specificData.employee_id));
-
-    const { data: treatments, error: treatmentsError } = await supabase
-      .from('prescriptions')
-      .select('id, date, diagnosis, doctorName')
-      .in('patientId', matchPatientIds)
-      .order('date', { ascending: false });
-
-    // 4. Fetch Lab Reports
-    const { data: rawLabReports, error: labError } = await supabase
-      .from('lab_reports')
-      .select('*')
-      .order('date', { ascending: false });
-
-    let labReports = [];
-    if (!labError && rawLabReports) {
-      const unpacked = rawLabReports.map(record => {
-        let json = {};
-        if (record.result) {
-          try { json = JSON.parse(record.result); } catch (e) {}
-        }
-        const isFinal = record.validated || json.status === 'Completed' || json.status === 'Validated';
-        return {
-          ...json,
-          id: record.id || json.id || '',
-          patientId: record.patient_id || json.patientId || '',
-          patientName: json.patientName || patientName || 'Unknown Patient',
-          testName: record.test_name || json.testName || 'Unknown Test',
-          status: isFinal ? 'Completed' : (json.status || 'Pending'),
-          date: record.date || json.date || new Date().toISOString().split('T')[0],
-          requestedAt: json.requestedAt || new Date().toISOString(),
-          completedAt: json.completedAt || json.validatedAt || record.date || new Date().toISOString(),
-          validatedAt: json.validatedAt || json.completedAt || record.date || new Date().toISOString()
-        };
-      });
-
-      const pIdLower = String(patientId).toLowerCase();
-      const rollLower = specificData?.roll_number ? String(specificData.roll_number).toLowerCase() : '';
-      const empLower = specificData?.employee_id ? String(specificData.employee_id).toLowerCase() : '';
-
-      labReports = unpacked.filter(r => {
-        const rPat = String(r.patientId || '').toLowerCase();
-        return rPat === pIdLower || (rollLower && rPat === rollLower) || (empLower && rPat === empLower);
-      });
-    }
+    const labReports = unpackLabReports(rawLabData, patientId, specificData, patientName);
+    const totalLabCount = labReports.totalCount !== undefined ? labReports.totalCount : labReports.length;
+    const isComplete = (treatments.length >= totalPrescriptionCount) && (labReports.length >= totalLabCount);
 
     // Calculate age from date_of_birth
     let calculatedAge = "N/A";
-    if (specificData && specificData.date_of_birth) {
+    if (specificData?.date_of_birth) {
       const dob = new Date(specificData.date_of_birth);
       const diffMs = Date.now() - dob.getTime();
       const ageDt = new Date(diffMs);
       calculatedAge = Math.abs(ageDt.getUTCFullYear() - 1970);
-    } else if (specificData && specificData.age) {
-      calculatedAge = specificData.age; // fallback for older records
+    } else if (specificData?.age) {
+      calculatedAge = specificData.age;
     }
 
-    // Combine everything into one big JSON object matching the UI
+    // Combine everything into one JSON object matching the exact frontend contract
     const comprehensiveData = {
       id: profile ? profile.id : patientId,
       email: patientEmail,
-      name: (patientName || profile?.name || 'Unknown'),
-      ...specificData, // adds phone, blood_group, guardian info, etc.
-      name: (patientName || specificData?.name || profile?.name || 'Unknown'),
+      name: patientName,
+      ...specificData,
+      name: patientName,
       age: calculatedAge,
-      treatmentHistory: treatments || [],
-      labReports: labReports || [],
+      treatmentHistory: treatments,
+      labReports: labReports,
       visitSummary: {
-        totalVisits: treatments?.length || 0,
-        lastVisit: treatments?.[0]?.date || null
+        totalVisits: totalPrescriptionCount,
+        lastVisit: treatments[0]?.date || null
+      },
+      clinicalHistoryMeta: {
+        isComplete,
+        totalPrescriptions: totalPrescriptionCount,
+        retrievedPrescriptions: treatments.length,
+        totalLabReports: totalLabCount,
+        retrievedLabReports: labReports.length,
+        isPaginated: Boolean(historyLimit)
       }
     };
 
@@ -575,37 +727,24 @@ export const createPatient = async (req, res) => {
 export const updatePatient = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateFields = req.body; // e.g. { date_of_birth: "...", registration_number: "..." }
+    const updateFields = req.body;
 
-    // First check if ID is UUID or roll_number
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
     let patientId = id;
 
-          if (!isUUID) {
-        console.log('Searching by roll_number or employee_id:', patientId);
-        let { data: patientRecord, error: pError } = await supabase
-          .from('patients')
-          .select('id')
-          .eq('roll_number', patientId).limit(1).maybeSingle();
+    if (!isUUID) {
+      const [patientLookup, teacherLookup] = await Promise.all([
+        supabase.from('patients').select('id').eq('roll_number', patientId).limit(1).maybeSingle(),
+        supabase.from('teachers').select('id').eq('employee_id', patientId).limit(1).maybeSingle()
+      ]);
 
-        if (!patientRecord) {
-           const { data: teacherRecord } = await supabase
-             .from('teachers')
-             .select('id')
-             .eq('employee_id', patientId).limit(1).maybeSingle();
-           if (teacherRecord) {
-             patientRecord = teacherRecord;
-             pError = null;
-           }
-        }
-
-        if (pError || !patientRecord) {
-          return res.status(404).json({ error: 'Patient not found' });
-        }
-        patientId = patientRecord.id;
+      const patientRecord = patientLookup?.data || teacherLookup?.data;
+      if (!patientRecord) {
+        return res.status(404).json({ error: 'Patient not found' });
       }
+      patientId = patientRecord.id;
+    }
 
-    // Now update the patients table
     const { data, error } = await supabase
       .from('patients')
       .update(updateFields)
