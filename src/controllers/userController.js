@@ -35,13 +35,52 @@ const patientDataSchema = z.object({
   age: optionalText
 }).partial().optional().nullable();
 
+// Public website listing created alongside a doctor account (staff_directory table).
+const directoryListingSchema = z.object({
+  publish: z.boolean().optional().default(true),
+  designation: z.string().trim().max(160).optional().default(''),
+  contact: z.string().trim().max(40).optional().default('')
+}).optional();
+
+export const DEFAULT_DOCTOR_DESIGNATION = 'Medical Officer';
+
 const createUserSchema = z.object({
   name: z.string().trim().min(2, 'Name must be at least 2 characters').max(120),
   email: z.string().trim().toLowerCase().email('A valid email address is required'),
   password: z.string().min(8, 'Password must be at least 8 characters').max(128),
   role: z.enum(ACCOUNT_TYPES, { message: 'Invalid role' }),
-  patientData: patientDataSchema
+  patientData: patientDataSchema,
+  directoryListing: directoryListingSchema
 });
+
+/**
+ * Adds (or refreshes) a doctor's entry in the public directory, matched by email so
+ * re-creating an account never produces duplicate listings.
+ */
+const publishDoctorToDirectory = async ({ name, email, designation, contact }) => {
+  const entry = {
+    name,
+    category: 'doctor',
+    designation: designation || DEFAULT_DOCTOR_DESIGNATION,
+    contact: contact || '',
+    email
+  };
+
+  const { data: existing, error: findError } = await supabase
+    .from('staff_directory')
+    .select('id')
+    .eq('category', 'doctor')
+    .eq('email', email)
+    .maybeSingle();
+  if (findError) throw findError;
+
+  const query = existing
+    ? supabase.from('staff_directory').update(entry).eq('id', existing.id).select()
+    : supabase.from('staff_directory').insert([entry]).select();
+  const { data, error } = await query;
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+};
 
 const updateUserSchema = z.object({
   name: z.string().trim().min(2, 'Name must be at least 2 characters').max(120).optional(),
@@ -165,7 +204,7 @@ export const createUser = async (req, res) => {
   const parsed = createUserSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json(formatZodError(parsed.error));
 
-  const { email, password, role, name, patientData } = parsed.data;
+  const { email, password, role, name, patientData, directoryListing } = parsed.data;
   const profileRole = toProfileRole(role);
 
   try {
@@ -203,7 +242,26 @@ export const createUser = async (req, res) => {
       }
     }
 
+    // Doctors are listed on the public website automatically unless the admin opts out.
+    let directoryEntry = null;
+    let directoryWarning = null;
+    if (role === 'doctor' && (directoryListing?.publish ?? true)) {
+      try {
+        directoryEntry = await publishDoctorToDirectory({
+          name,
+          email,
+          designation: directoryListing?.designation,
+          contact: directoryListing?.contact
+        });
+      } catch (dirErr) {
+        directoryWarning = `Doctor created but not added to the public directory: ${dirErr.message}`;
+        logger.warn(`[Users] ${directoryWarning}`);
+      }
+    }
+
     invalidateUserRole(userId);
+
+    const warning = [patientWarning, directoryWarning].filter(Boolean).join(' ') || null;
 
     res.status(201).json({
       id: userId,
@@ -216,7 +274,8 @@ export const createUser = async (req, res) => {
       patients: patientData && PATIENT_ACCOUNT_TYPES.includes(role) && !patientWarning
         ? buildPatientRow(userId, patientData)
         : null,
-      ...(patientWarning ? { warning: patientWarning } : {})
+      ...(directoryEntry ? { directoryEntry } : {}),
+      ...(warning ? { warning } : {})
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

@@ -276,6 +276,75 @@ describe('Admin module — stats, user management, catalog & inventory', () => {
     assert.equal(patientUpsert[1].age, 21);
   });
 
+  const doctorBody = (extra = {}) => ({ name: 'Dr. Nusrat Jahan', email: 'Nusrat@RUET.ac.bd', password: 'password123', role: 'doctor', ...extra });
+  const directoryOps = () => calls.filter((c) => c.table === 'staff_directory').flatMap((c) => c.ops.map((o) => o[0]));
+
+  test('POST /api/users publishes new doctors to the public directory', async () => {
+    results = {
+      profiles: { data: null, error: null },
+      staff_directory: (entry) => entry.ops.some((o) => o[0] === 'insert')
+        ? { data: [{ id: 42, ...entry.ops.find((o) => o[0] === 'insert')[1][0] }], error: null }
+        : { data: null, error: null }
+    };
+    const res = await call('POST', '/api/users', adminToken, doctorBody({
+      directoryListing: { designation: 'Senior Medical Officer', contact: '01711000000' }
+    }));
+    assert.equal(res.statusCode, 201);
+    const insert = calls.filter((c) => c.table === 'staff_directory').flatMap((c) => c.ops).find((o) => o[0] === 'insert');
+    assert.deepEqual(insert[1][0], {
+      name: 'Dr. Nusrat Jahan', category: 'doctor', designation: 'Senior Medical Officer',
+      contact: '01711000000', email: 'nusrat@ruet.ac.bd'
+    });
+    assert.equal(res.json.directoryEntry.id, 42);
+    assert.equal(res.json.warning, undefined);
+  });
+
+  test('Doctor directory listing defaults the designation and is published without explicit options', async () => {
+    results = { profiles: { data: null, error: null }, staff_directory: { data: [], error: null } };
+    const res = await call('POST', '/api/users', adminToken, doctorBody());
+    assert.equal(res.statusCode, 201);
+    const insert = calls.filter((c) => c.table === 'staff_directory').flatMap((c) => c.ops).find((o) => o[0] === 'insert');
+    assert.equal(insert[1][0].designation, 'Medical Officer');
+  });
+
+  test('Existing directory entries (matched by email) are updated, not duplicated', async () => {
+    results = {
+      profiles: { data: null, error: null },
+      staff_directory: (entry) => entry.ops.some((o) => o[0] === 'update')
+        ? { data: [{ id: 7, name: 'Dr. Nusrat Jahan' }], error: null }
+        : { data: { id: 7 }, error: null }
+    };
+    const res = await call('POST', '/api/users', adminToken, doctorBody());
+    assert.equal(res.statusCode, 201);
+    assert.ok(directoryOps().includes('update'));
+    assert.ok(!directoryOps().includes('insert'));
+    const eqs = calls.filter((c) => c.table === 'staff_directory').flatMap((c) => c.ops).filter((o) => o[0] === 'eq');
+    assert.ok(eqs.some((o) => o[1] === 'email' && o[2] === 'nusrat@ruet.ac.bd'));
+  });
+
+  test('Admins can opt out of publishing a doctor; other roles are never published', async () => {
+    results = { profiles: { data: null, error: null }, patients: { data: null, error: null } };
+    const optOut = await call('POST', '/api/users', adminToken, doctorBody({ directoryListing: { publish: false } }));
+    assert.equal(optOut.statusCode, 201);
+    const receptionist = await call('POST', '/api/users', adminToken, {
+      name: 'Front Desk', email: 'desk@ruet.ac.bd', password: 'password123', role: 'receptionist',
+      directoryListing: { publish: true, designation: 'Receptionist' }
+    });
+    assert.equal(receptionist.statusCode, 201);
+    assert.deepEqual(directoryOps(), []);
+  });
+
+  test('A directory failure does not block doctor creation and is reported as a warning', async () => {
+    results = {
+      profiles: { data: null, error: null },
+      staff_directory: { data: null, error: { message: 'permission denied for table staff_directory' } }
+    };
+    const res = await call('POST', '/api/users', adminToken, doctorBody());
+    assert.equal(res.statusCode, 201);
+    assert.match(res.json.warning, /not added to the public directory/);
+    assert.ok(!adminApiCalls.some((c) => c[0] === 'deleteUser'));
+  });
+
   test('POST /api/users rolls back the auth account if the profile cannot be saved', async () => {
     results = { profiles: { data: null, error: { message: 'invalid input value for enum' } } };
     const res = await call('POST', '/api/users', adminToken, { name: 'Doc', email: 'doc@x.com', password: 'password123', role: 'doctor' });
