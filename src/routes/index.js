@@ -13,6 +13,7 @@ import testRoutes from './testRoutes.js';
 import userRoutes from './userRoutes.js';
 import directoryRoutes from './directoryRoutes.js';
 import medicineRoutes from './medicineRoutes.js';
+import adminRoutes from './adminRoutes.js';
 
 const router = express.Router();
 
@@ -34,6 +35,7 @@ router.use(requireAuth);
 
 // Mount protected routes (administrative routes enforce strict fresh session validation)
 router.use('/users', requireAuth({ requireFreshSession: true }), userRoutes);
+router.use('/admin', requireAuth({ requireFreshSession: true }), adminRoutes);
 router.use('/patients', patientRoutes);
 router.use('/appointments', appointmentRoutes);
 router.use('/prescriptions', prescriptionRoutes);
