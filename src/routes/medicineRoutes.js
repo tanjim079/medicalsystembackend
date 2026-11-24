@@ -1,5 +1,5 @@
 import express from 'express';
-import { getMedicines, updateMedicineStock, addMedicine } from '../controllers/medicineController.js';
+import { getMedicines, updateMedicineStock, addMedicine, adjustMedicineStock, deleteMedicine } from '../controllers/medicineController.js';
 
 import { requireAuth, requireRole } from '../middleware/authMiddleware.js';
 
@@ -93,5 +93,23 @@ router.put('/:id', requireAuth, requireRole(['admin', 'pharmacist', 'doctor']), 
  *         description: Medicine added successfully
  */
 router.post('/', requireAuth, requireRole(['admin', 'pharmacist']), addMedicine);
+
+/**
+ * @swagger
+ * /medicines/{id}/adjust:
+ *   patch:
+ *     summary: Restock or write off medicine units by a signed delta (admin/pharmacist)
+ *     tags: [Medicines]
+ */
+router.patch('/:id/adjust', requireAuth, requireRole(['admin', 'pharmacist']), adjustMedicineStock);
+
+/**
+ * @swagger
+ * /medicines/{id}:
+ *   delete:
+ *     summary: Delete a medicine (admin only)
+ *     tags: [Medicines]
+ */
+router.delete('/:id', requireAuth({ requireFreshSession: true }), requireRole(['admin']), deleteMedicine);
 
 export default router;

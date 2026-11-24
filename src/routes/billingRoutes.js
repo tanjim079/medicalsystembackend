@@ -4,7 +4,8 @@ import { requireRole } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/', async (req, res) => {
+// Billing records contain patient financial data: restrict to billing staff and admins
+router.get('/', requireRole(['admin', 'receptionist']), async (req, res) => {
   try {
     const { data, error } = await supabase.from('bills').select('*').order('date', { ascending: false });
     if (error) throw error;
@@ -27,7 +28,10 @@ router.post('/', requireRole(['admin', 'receptionist']), async (req, res) => {
 router.put('/:id/status', requireRole(['admin', 'receptionist']), async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body || {};
+    if (!['Paid', 'Due'].includes(status)) {
+      return res.status(400).json({ error: "Status must be 'Paid' or 'Due'" });
+    }
     const { data, error } = await supabase.from('bills').update({ status }).eq('id', id).select();
     if (error) throw error;
     res.status(200).json(data[0]);
